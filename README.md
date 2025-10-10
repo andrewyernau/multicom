@@ -16,9 +16,23 @@ Proveer material formativo (apuntes, ejemplos y prácticas) para que el estudian
 
 - `lib/theory/` — Apuntes de teoría, cada unidad convertida a Markdown (`unit1.md`, `unit2.md`, ...). Algunos archivos fueron generados automáticamente a partir de fuentes TXT.
 - `lib/practices/` — Guías de prácticas y ejercicios (por ejemplo `lab1.md`).
+- `agents/` — Definiciones de agentes para automatización de tareas (arquitectura, testing, documentación, etc.).
+- `context/` — Contexto del repositorio generado por el sistema de comandos.
 - `README.md` — Este fichero.
 
 Si abres la carpeta `lib/theory` y `lib/practices` verás los documentos en formato Markdown listos para leer o publicar.
+
+## Sistema de Comandos para Agentes
+
+Este repositorio incluye un sistema de comandos para ejecutar agentes especializados:
+
+```bash
+./init.sh              # Inicializar contexto del repositorio
+./agent.sh list        # Listar agentes disponibles
+./agent.sh <agente>    # Ejecutar un agente específico
+```
+
+Consulta [COMMANDS.md](./COMMANDS.md) para más detalles sobre los comandos disponibles y los agentes configurados.
 
 ## Cómo usar el material
 

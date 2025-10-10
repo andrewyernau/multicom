@@ -1,0 +1,25 @@
+{
+  "repository": {
+    "name": "DigitalLaboratoryContents",
+    "root": "/home/andrewyernau/dev/DigitalLaboratoryContents",
+    "git": {
+      "branch": "main",
+      "commit": "ed9328d"
+    }
+  },
+  "initialized": "2025-10-10T07:48:25Z",
+  "agents": [
+    "architect-agent",
+    "documentation-agent",
+    "domain-agent",
+    "security-agent",
+    "tdd-agent",
+    "ux-ui-agent"
+  ],
+  "structure": {
+    "src_files": 350,
+    "lib_files": 19,
+    "agents_count": 6
+  },
+  "status": "initialized"
+}
