@@ -150,12 +150,21 @@ static void Main()
 }
 ```
 
+
 Polimorfismo
 ------------
 
 El polimorfismo permite que varios objetos compartan la misma interfaz y se comporten de forma diferente. Se logra con métodos virtuales y override.
 
 Ejemplo:
+
+```csharp
+public virtual void Acelerar()
+{
+    Console.WriteLine("Accionando el mecanismo simple de aceleración");
+    ...
+}
+```
 
 ```csharp
 class CocheAceleradorAvanzado : Coche
