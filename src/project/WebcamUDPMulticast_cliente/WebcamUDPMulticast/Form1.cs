@@ -86,5 +86,39 @@ namespace WebcamUDPMulticast
         {
 
         }
+
+        // Crear la comunicación multicast cliente
+
+        IPEndPoint localEp = new IPEndPoint(IPAddress.Any, UDP_PORT);
+        // configurar socket para reutilizar puerto / aceptar tráfico multicast
+        // cliente.SetSocketOption(...); client.Bind(localEp);
+
+
+        // Almacenar en memorystream para reconstruir imagen
+        using (var ms = new MemoryStream(buffer))
+        {
+	        var img = Image.FromStream(ms);
+            pictureBoxDisplay.Image = img;
+        }
+
+        /////////////
+        // Visualizar
+        /////////////
+        Byte[] buffer = udpClient.Receive(ref localEp);
+
+        Task t1 = new Task(visualizar_imagen);
+        t1.Start();
+
+        private void visualizar_imagen()
+        {
+            while (true)
+            {
+                try
+                {
+                    // recepción y procesamiento
+                }
+                catch (Exception) { /* manejo */ }
+            }
+        }
     }
 }
