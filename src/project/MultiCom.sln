@@ -1,0 +1,33 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34309.116
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiCom.Server", "MultiCom.Server\MultiCom.Server.csproj", "{5F0A867A-513F-411D-9F2F-78093DE81681}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiCom.Client", "MultiCom.Client\MultiCom.Client.csproj", "{4379D0E4-71B6-433F-A45F-6995F8FB77B5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiCom.Shared", "MultiCom.Shared\MultiCom.Shared.csproj", "{1B2DDEA8-1F85-471F-8E84-6E562EDC6B2A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5F0A867A-513F-411D-9F2F-78093DE81681}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5F0A867A-513F-411D-9F2F-78093DE81681}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5F0A867A-513F-411D-9F2F-78093DE81681}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5F0A867A-513F-411D-9F2F-78093DE81681}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4379D0E4-71B6-433F-A45F-6995F8FB77B5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4379D0E4-71B6-433F-A45F-6995F8FB77B5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4379D0E4-71B6-433F-A45F-6995F8FB77B5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4379D0E4-71B6-433F-A45F-6995F8FB77B5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1B2DDEA8-1F85-471F-8E84-6E562EDC6B2A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1B2DDEA8-1F85-471F-8E84-6E562EDC6B2A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1B2DDEA8-1F85-471F-8E84-6E562EDC6B2A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1B2DDEA8-1F85-471F-8E84-6E562EDC6B2A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
