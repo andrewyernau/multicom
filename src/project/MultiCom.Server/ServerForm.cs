@@ -22,6 +22,16 @@ namespace MultiCom.Server
         private UdpClient snapshotSender;
         private DateTime lastSnapshotUtc = DateTime.MinValue;
         private int snapshotsBroadcast;
+        private CancellationTokenSource relayToken;
+        private Task videoRelayTask;
+        private Task chatRelayTask;
+        private Task audioRelayTask;
+        private UdpClient videoRelayReceiver;
+        private UdpClient chatRelayReceiver;
+        private UdpClient audioRelayReceiver;
+        private UdpClient videoRelaySender;
+        private UdpClient chatRelaySender;
+        private UdpClient audioRelaySender;
 
         public ServerForm()
         {
@@ -93,6 +103,8 @@ namespace MultiCom.Server
                 roster.Clear();
             }
 
+            StopRelayServices();
+
             snapshotsBroadcast = 0;
             lastSnapshotUtc = DateTime.MinValue;
             UpdateRosterList();
@@ -127,6 +139,7 @@ namespace MultiCom.Server
             lastSnapshotUtc = DateTime.MinValue;
             UpdateRosterList();
             UpdateMetrics();
+            StartRelayServices();
             Log("[INFO] Presence service started.");
             var _ = BroadcastSnapshotAsync();
         }
@@ -259,6 +272,159 @@ namespace MultiCom.Server
             finally
             {
                 snapshotLock.Release();
+            }
+        }
+
+        private void StartRelayServices()
+        {
+            if (relayToken != null)
+            {
+                return;
+            }
+
+            relayToken = new CancellationTokenSource();
+            var token = relayToken.Token;
+
+            try
+            {
+                videoRelayReceiver = CreateRelayReceiver(MulticastChannels.VIDEO_PORT);
+                chatRelayReceiver = CreateRelayReceiver(MulticastChannels.CHAT_PORT);
+                audioRelayReceiver = CreateRelayReceiver(MulticastChannels.AUDIO_PORT);
+
+                videoRelaySender = CreateRelaySender(MulticastChannels.BuildVideoEndpoint().Address);
+                chatRelaySender = CreateRelaySender(MulticastChannels.BuildChatEndpoint().Address);
+                audioRelaySender = CreateRelaySender(MulticastChannels.BuildAudioEndpoint().Address);
+
+                videoRelayTask = StartRelayLoop(videoRelayReceiver, videoRelaySender, MulticastChannels.BuildVideoEndpoint(), "Video", token);
+                chatRelayTask = StartRelayLoop(chatRelayReceiver, chatRelaySender, MulticastChannels.BuildChatEndpoint(), "Chat", token);
+                audioRelayTask = StartRelayLoop(audioRelayReceiver, audioRelaySender, MulticastChannels.BuildAudioEndpoint(), "Audio", token);
+
+                Log("[INFO] Relay services started.");
+            }
+            catch (Exception ex)
+            {
+                Log("[ERROR] Unable to start relay services: " + ex.Message);
+                StopRelayServices();
+            }
+        }
+
+        private void StopRelayServices()
+        {
+            if (relayToken == null)
+            {
+                return;
+            }
+
+            relayToken.Cancel();
+
+            CloseRelayClient(ref videoRelayReceiver);
+            CloseRelayClient(ref chatRelayReceiver);
+            CloseRelayClient(ref audioRelayReceiver);
+            CloseRelayClient(ref videoRelaySender);
+            CloseRelayClient(ref chatRelaySender);
+            CloseRelayClient(ref audioRelaySender);
+
+            WaitRelayTask(videoRelayTask);
+            WaitRelayTask(chatRelayTask);
+            WaitRelayTask(audioRelayTask);
+
+            relayToken.Dispose();
+            relayToken = null;
+            videoRelayTask = null;
+            chatRelayTask = null;
+            audioRelayTask = null;
+            Log("[INFO] Relay services stopped.");
+        }
+
+        private static UdpClient CreateRelayReceiver(int port)
+        {
+            var udp = new UdpClient(AddressFamily.InterNetwork);
+            udp.ExclusiveAddressUse = false;
+            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            udp.Client.Bind(new IPEndPoint(IPAddress.Any, port));
+            return udp;
+        }
+
+        private static UdpClient CreateRelaySender(IPAddress multicastAddress)
+        {
+            var udp = new UdpClient(AddressFamily.InterNetwork);
+            udp.ExclusiveAddressUse = false;
+            udp.MulticastLoopback = true;
+            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            udp.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 32);
+            udp.JoinMulticastGroup(multicastAddress);
+            return udp;
+        }
+
+        private Task StartRelayLoop(UdpClient receiver, UdpClient sender, IPEndPoint target, string label, CancellationToken token)
+        {
+            return Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    UdpReceiveResult result;
+                    try
+                    {
+                        result = await receiver.ReceiveAsync().ConfigureAwait(false);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        break;
+                    }
+                    catch (SocketException ex)
+                    {
+                        Log("[ERROR] " + label + " relay receive: " + ex.Message);
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("[ERROR] " + label + " relay receive: " + ex.Message);
+                        continue;
+                    }
+
+                    try
+                    {
+                        await sender.SendAsync(result.Buffer, result.Buffer.Length, target).ConfigureAwait(false);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("[ERROR] " + label + " relay send: " + ex.Message);
+                    }
+                }
+            }, token);
+        }
+
+        private void CloseRelayClient(ref UdpClient client)
+        {
+            if (client == null)
+            {
+                return;
+            }
+
+            client.Close();
+            client = null;
+        }
+
+        private void WaitRelayTask(Task task)
+        {
+            if (task == null)
+            {
+                return;
+            }
+
+            try
+            {
+                task.Wait(TimeSpan.FromSeconds(1));
+            }
+            catch (AggregateException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
             }
         }
 

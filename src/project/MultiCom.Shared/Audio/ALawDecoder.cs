@@ -1,10 +1,7 @@
 using System;
-using System.Collections.Generic;
-using System.Text;
 
-namespace ALaw
+namespace MultiCom.Shared.Audio
 {
-    
     public static class ALawDecoder
     {
        

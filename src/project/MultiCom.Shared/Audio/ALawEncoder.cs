@@ -1,11 +1,8 @@
 using System;
-using System.Collections.Generic;
-using System.Text;
 
-namespace ALaw
+namespace MultiCom.Shared.Audio
 {
-    
-    public class ALawEncoder
+    public static class ALawEncoder
     {
         public const int MAX = 0x7fff; 
 

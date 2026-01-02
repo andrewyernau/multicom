@@ -1,75 +1,137 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
+using System;
 using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Windows.Forms;
-using Touchless.Vision.Camera;
-
-// UDP y Multicast.
-using System.Net.Sockets;
-using System.Net;
 using System.IO;
-
-// IMAGE
-using System.Drawing.Imaging;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace WebcamUDPMulticast
 {
     public partial class Form1 : Form
     {
+        private const string MULTICAST_ADDRESS = "224.0.0.1";
+        private const int UDP_PORT = 8080;
+
+        private CancellationTokenSource receiverCts;
+        private Task receiverTask;
+        private UdpClient udpClient;
+        private IPEndPoint remoteEndpoint = new IPEndPoint(IPAddress.Any, UDP_PORT);
 
         public Form1()
         {
-            InitializeComponent();            
+            InitializeComponent();
         }
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            Task t1 = new Task(visualizar_imagen);
-            t1.Start();
-
+            StartReceiver();
         }
 
-        private void button1_Click(object sender, EventArgs e)
+        private void StartReceiver()
         {
-            
+            StopReceiver();
 
-            
+            try
+            {
+                receiverCts = new CancellationTokenSource();
+                udpClient = new UdpClient(AddressFamily.InterNetwork);
+                udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                udpClient.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true);
+                udpClient.Client.ReceiveTimeout = 1000;
+                udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, UDP_PORT));
+                udpClient.JoinMulticastGroup(IPAddress.Parse(MULTICAST_ADDRESS));
+
+                receiverTask = Task.Run(() => ReceiveLoop(receiverCts.Token));
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"[AGENT] Unable to start multicast reception: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                StopReceiver();
+            }
         }
 
-        private void visualizar_imagen()
+        private void StopReceiver()
         {
-            UdpClient udpClient = new UdpClient();
-            IPAddress multicastaddress = IPAddress.Parse("224.0.0.1");
-            udpClient.JoinMulticastGroup(multicastaddress);
+            if (receiverCts == null)
+            {
+                return;
+            }
 
-            IPEndPoint remoteep = new IPEndPoint(IPAddress.Any, 8080);
+            receiverCts.Cancel();
 
-            udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true); 
-            udpClient.Client.Bind(remoteep); 
-            while (true)
+            if (udpClient != null)
+            {
+                udpClient.Close();
+                udpClient = null;
+            }
+
+            try
+            {
+                receiverTask?.Wait(TimeSpan.FromSeconds(1));
+            }
+            catch (AggregateException)
+            {
+            }
+
+            receiverTask = null;
+            receiverCts.Dispose();
+            receiverCts = null;
+        }
+
+        private void ReceiveLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
             {
                 try
                 {
-                    Byte[] payload = udpClient.Receive(ref remoteep);
+                    var payload = udpClient.Receive(ref remoteEndpoint);
+                    if (payload == null || payload.Length == 0)
+                    {
+                        continue;
+                    }
 
-                    pictureBox1.Image = byteArrayToImage(payload);
+                    var frame = ByteArrayToImage(payload);
+                    RenderFrame(frame);
                 }
-                catch (Exception x)
+                catch (SocketException ex)
                 {
-                    x.ToString();
+                    if (token.IsCancellationRequested || ex.SocketErrorCode == SocketError.Interrupted)
+                    {
+                        break;
+                    }
+
+                    if (ex.SocketErrorCode == SocketError.TimedOut)
+                    {
+                        continue;
+                    }
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+                catch (Exception)
+                {
+                    // Non-critical frame error, keep listening
                 }
             }
+        }
 
-
-                
+        private void RenderFrame(Image frame)
+        {
+            if (pictureBox1.InvokeRequired)
+            {
+                pictureBox1.BeginInvoke(new Action(() => RenderFrame(frame)));
+                return;
             }
 
-        public Image byteArrayToImage(byte[] byteArrayIn)
+            var previous = pictureBox1.Image;
+            pictureBox1.Image = frame;
+            previous?.Dispose();
+        }
+
+        private Image ByteArrayToImage(byte[] byteArrayIn)
         {
             using (var ms = new MemoryStream(byteArrayIn))
             {
@@ -77,48 +139,22 @@ namespace WebcamUDPMulticast
             }
         }
 
+        private void button1_Click(object sender, EventArgs e)
+        {
+        }
+
         private void comboBox1_SelectedIndexChanged(object sender, EventArgs e)
         {
-
         }
 
         private void pictureBox1_Click(object sender, EventArgs e)
         {
-
         }
 
-        // Crear la comunicación multicast cliente
-
-        IPEndPoint localEp = new IPEndPoint(IPAddress.Any, UDP_PORT);
-        // configurar socket para reutilizar puerto / aceptar tráfico multicast
-        // cliente.SetSocketOption(...); client.Bind(localEp);
-
-
-        // Almacenar en memorystream para reconstruir imagen
-        using (var ms = new MemoryStream(buffer))
+        protected override void OnFormClosing(FormClosingEventArgs e)
         {
-	        var img = Image.FromStream(ms);
-            pictureBoxDisplay.Image = img;
-        }
-
-        /////////////
-        // Visualizar
-        /////////////
-        Byte[] buffer = udpClient.Receive(ref localEp);
-
-        Task t1 = new Task(visualizar_imagen);
-        t1.Start();
-
-        private void visualizar_imagen()
-        {
-            while (true)
-            {
-                try
-                {
-                    // recepción y procesamiento
-                }
-                catch (Exception) { /* manejo */ }
-            }
+            StopReceiver();
+            base.OnFormClosing(e);
         }
     }
 }

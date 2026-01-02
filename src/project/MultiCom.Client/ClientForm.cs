@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using MultiCom.Client.Audio;
+using MultiCom.Shared.Audio;
 using MultiCom.Shared.Chat;
 using MultiCom.Shared.Networking;
 using Touchless.Vision.Camera;
@@ -19,14 +20,16 @@ namespace MultiCom.Client
 {
     public partial class ClientForm : Form
     {
-        private const int PAYLOAD_BYTES = 12000;
-        private const int TARGET_WIDTH = 640;
-        private const int TARGET_HEIGHT = 360;
-        private const int TARGET_FPS = 20;
+        private const int MAX_DATAGRAM_BYTES = 64000;
+        private const int PAYLOAD_BYTES = MAX_DATAGRAM_BYTES;
+        private const int TARGET_WIDTH = 320;
+        private const int TARGET_HEIGHT = 240;
+        private const int TARGET_FPS = 15;
         private const float SPEAKING_THRESHOLD = 0.18f;
 
         private readonly IPEndPoint videoEndpoint = MulticastChannels.BuildVideoEndpoint();
         private readonly IPEndPoint chatEndpoint = MulticastChannels.BuildChatEndpoint();
+        private readonly IPEndPoint audioEndpoint = MulticastChannels.BuildAudioEndpoint();
         private readonly IPEndPoint controlEndpoint = MulticastChannels.BuildControlEndpoint();
         private static readonly ImageCodecInfo JpegCodec = ImageCodecInfo.GetImageEncoders().FirstOrDefault(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
 
@@ -40,7 +43,7 @@ namespace MultiCom.Client
         private int captureWidth = TARGET_WIDTH;
         private int captureHeight = TARGET_HEIGHT;
         private int captureFps = TARGET_FPS;
-        private long jpegQuality = 80L;
+        private long jpegQuality = 70L;
 
         private sealed class VideoTile
         {
@@ -88,22 +91,37 @@ namespace MultiCom.Client
         private readonly TimeSpan presenceMinInterval = TimeSpan.FromMilliseconds(400);
         private readonly TimeSpan serverTimeoutWindow = TimeSpan.FromSeconds(6);
         private readonly TimeSpan serverGraceWindow = TimeSpan.FromSeconds(5);
+        private const int CHAT_HISTORY_LIMIT = 512;
+        private readonly object chatHistoryGate = new object();
+        private readonly LinkedList<Guid> chatMessageOrder = new LinkedList<Guid>();
+        private readonly HashSet<Guid> chatMessageCache = new HashSet<Guid>();
 
         private CancellationTokenSource videoCts;
         private CancellationTokenSource chatCts;
         private CancellationTokenSource controlCts;
         private CancellationTokenSource cameraCts;
+        private CancellationTokenSource audioCts;
         private UdpClient chatSender;
         private UdpClient controlSender;
         private UdpClient videoSender;
+        private UdpClient audioSender;
+        private UdpClient videoListener;
+        private UdpClient chatListener;
+        private UdpClient controlListener;
+        private UdpClient audioListener;
+        private Task videoListenTask;
+        private Task chatListenTask;
+        private Task controlListenTask;
+        private Task audioListenTask;
         private CameraFrameSource frameSource;
         private System.Threading.Timer heartbeatTimer;
-        private AudioLevelMonitor audioMonitor;
+        private AudioCaptureSession audioCapture;
+        private AudioPlaybackManager audioPlayback;
         private int frameNumber;
+        private int audioSequence;
         private bool isSpeakingLocal;
         private bool serverReachable;
         private bool serverDisconnectNotified;
-        private bool suppressServerAlertReset;
         private bool isDisconnecting;
         private DateTime lastPresenceSentUtc = DateTime.MinValue;
         private DateTime lastServerSnapshotUtc = DateTime.MinValue;
@@ -121,9 +139,9 @@ namespace MultiCom.Client
             uiTimer.Start();
             LoadCameras();
             LoadAudioDevices();
-            EnsureAudioMonitor();
+            audioPlayback = new AudioPlaybackManager();
             performanceTracker.Reset();
-            StartNetworking();
+            Log("[INFO] Ready. Configure preferences and press Connect to join the session.");
         }
 
         private void ApplyDiscordPalette()
@@ -152,6 +170,15 @@ namespace MultiCom.Client
 
             performanceTracker.Reset();
 
+            if (serverUnicastAddress == null)
+            {
+                Log("[INFO] No server IP configured. Joining multicast channels directly.");
+            }
+            else
+            {
+                Log(string.Format("[INFO] Targeting server {0}", serverUnicastAddress));
+            }
+
             try
             {
                 btnConnect.Enabled = false;
@@ -167,7 +194,6 @@ namespace MultiCom.Client
 
                 serverReachable = false;
                 serverDisconnectNotified = false;
-                suppressServerAlertReset = false;
                 connectionStartedUtc = DateTime.UtcNow;
                 lastServerSnapshotUtc = DateTime.MinValue;
                 lastPresenceSentUtc = DateTime.MinValue;
@@ -175,16 +201,25 @@ namespace MultiCom.Client
                 videoCts = new CancellationTokenSource();
                 chatCts = new CancellationTokenSource();
                 controlCts = new CancellationTokenSource();
+                audioCts = new CancellationTokenSource();
+                audioSequence = 0;
 
                 chatSender = CreateMulticastSender(true, chatEndpoint.Address);
                 controlSender = CreateMulticastSender(true, controlEndpoint.Address);
+                audioSender = CreateMulticastSender(true, audioEndpoint.Address);
 
-                Task.Run(() => ListenVideoLoop(videoCts.Token));
-                Task.Run(() => ListenChatLoop(chatCts.Token));
-                Task.Run(() => ListenControlLoop(controlCts.Token));
+                videoListener = CreateMulticastListener(videoEndpoint);
+                chatListener = CreateMulticastListener(chatEndpoint);
+                controlListener = CreateMulticastListener(controlEndpoint);
+                audioListener = CreateMulticastListener(audioEndpoint);
+
+                videoListenTask = Task.Run(() => ListenVideoLoop(videoListener, videoEndpoint, videoCts.Token));
+                chatListenTask = Task.Run(() => ListenChatLoop(chatListener, chatEndpoint, chatCts.Token));
+                controlListenTask = Task.Run(() => ListenControlLoop(controlListener, controlEndpoint, controlCts.Token));
+                audioListenTask = Task.Run(() => ListenAudioLoop(audioListener, audioEndpoint, audioCts.Token));
 
                 StartHeartbeat();
-                EnsureAudioMonitor();
+                StartAudioCapture();
                 SendPresence(PresenceOpcode.Hello, true);
                 Log("[INFO] Connected to MultiCom services.");
 
@@ -228,16 +263,23 @@ namespace MultiCom.Client
                 }
 
                 StopHeartbeat();
-                StopAudioMonitor();
+                StopAudioCapture();
                 StopCameraCapture();
 
                 CancelTokenSource(ref videoCts);
                 CancelTokenSource(ref chatCts);
                 CancelTokenSource(ref controlCts);
+                CancelTokenSource(ref audioCts);
+
+                StopListener(ref videoListenTask, ref videoListener);
+                StopListener(ref chatListenTask, ref chatListener);
+                StopListener(ref controlListenTask, ref controlListener);
+                StopListener(ref audioListenTask, ref audioListener);
 
                 CloseClient(ref chatSender);
                 CloseClient(ref controlSender);
                 CloseClient(ref videoSender);
+                CloseClient(ref audioSender);
 
                 lock (presenceGate)
                 {
@@ -247,6 +289,14 @@ namespace MultiCom.Client
                 ClearVideoTiles();
                 UpdateMembersList();
                 performanceTracker.Reset();
+                audioPlayback?.Clear();
+                audioSequence = 0;
+
+                lock (chatHistoryGate)
+                {
+                    chatMessageCache.Clear();
+                    chatMessageOrder.Clear();
+                }
 
                 btnConnect.Enabled = true;
                 btnDisconnect.Enabled = false;
@@ -257,16 +307,12 @@ namespace MultiCom.Client
                 lastPresenceSentUtc = DateTime.MinValue;
                 isSpeakingLocal = false;
 
-                if (!suppressServerAlertReset)
-                {
-                    serverDisconnectNotified = false;
-                }
+                serverDisconnectNotified = false;
 
                 Log(logMessage);
             }
             finally
             {
-                suppressServerAlertReset = false;
                 isDisconnecting = false;
             }
         }
@@ -295,6 +341,17 @@ namespace MultiCom.Client
         private void LoadAudioDevices()
         {
             cachedAudioDevices = AudioDeviceCatalog.EnumerateCaptureDevices();
+            if (cachedAudioDevices.Count == 0)
+            {
+                if (!string.IsNullOrEmpty(selectedAudioDeviceId))
+                {
+                    selectedAudioDeviceId = null;
+                }
+
+                Log("[WARN] No audio capture devices detected.");
+                return;
+            }
+
             if (!string.IsNullOrEmpty(selectedAudioDeviceId) && cachedAudioDevices.All(d => !string.Equals(d.Id, selectedAudioDeviceId, StringComparison.OrdinalIgnoreCase)))
             {
                 selectedAudioDeviceId = null;
@@ -400,52 +457,116 @@ namespace MultiCom.Client
             btnToggleCamera.BackColor = broadcasting ? Color.FromArgb(240, 71, 71) : Color.FromArgb(67, 181, 129);
         }
 
-        private void EnsureAudioMonitor()
+        private void StartAudioCapture()
         {
-            if (audioMonitor != null)
+            if (audioCapture != null || !IsConnected())
             {
                 return;
             }
 
+            if (cachedAudioDevices.Count == 0)
+            {
+                Log("[WARN] Cannot start microphone: no devices detected.");
+                return;
+            }
+
+            var deviceNumber = ResolveAudioDeviceNumber();
             try
             {
-                audioMonitor = new AudioLevelMonitor(selectedAudioDeviceId);
-                audioMonitor.LevelAvailable += OnAudioLevel;
+                audioCapture = new AudioCaptureSession(deviceNumber);
+                audioCapture.BufferReady += OnAudioBufferReady;
+                audioCapture.Start();
+                Log("[INFO] Microphone capture started.");
             }
             catch (Exception ex)
             {
-                Log("[WARN] Audio detection unavailable: " + ex.Message);
-                audioMonitor = null;
+                Log("[ERROR] Microphone start failed: " + ex.Message);
+                StopAudioCapture();
             }
         }
 
-        private void StopAudioMonitor()
+        private void StopAudioCapture()
         {
-            if (audioMonitor != null)
+            if (audioCapture != null)
             {
-                audioMonitor.LevelAvailable -= OnAudioLevel;
-                audioMonitor.Dispose();
-                audioMonitor = null;
+                audioCapture.BufferReady -= OnAudioBufferReady;
+                audioCapture.Dispose();
+                audioCapture = null;
             }
 
             if (isSpeakingLocal)
             {
                 isSpeakingLocal = false;
+                SendPresence(PresenceOpcode.Heartbeat, true);
                 ApplySpeakingVisual(clientId, false);
             }
         }
 
-        private void OnAudioLevel(object sender, float level)
+        private void RestartAudioCapture()
         {
-            var speaking = level >= SPEAKING_THRESHOLD;
-            if (speaking == isSpeakingLocal)
+            StopAudioCapture();
+            if (IsConnected())
+            {
+                StartAudioCapture();
+            }
+        }
+
+        private void OnAudioBufferReady(object sender, byte[] buffer)
+        {
+            if (buffer == null || buffer.Length == 0 || audioSender == null)
             {
                 return;
             }
 
-            isSpeakingLocal = speaking;
-            SendPresence(PresenceOpcode.Heartbeat, true);
-            ApplySpeakingVisual(clientId, speaking);
+            var level = CalculateAverageLevel(buffer);
+            var speaking = level >= SPEAKING_THRESHOLD;
+            if (speaking != isSpeakingLocal)
+            {
+                isSpeakingLocal = speaking;
+                SendPresence(PresenceOpcode.Heartbeat, true);
+                ApplySpeakingVisual(clientId, speaking);
+            }
+
+            var payload = ALawEncoder.ALawEncode(buffer);
+            var frame = new AudioFrame(clientId, audioSequence++, payload, DateTime.UtcNow.Ticks);
+            var packet = frame.ToPacket();
+            var target = ResolveTransmissionEndpoint(audioEndpoint);
+            var _ = audioSender.SendAsync(packet, packet.Length, target);
+        }
+
+        private float CalculateAverageLevel(byte[] pcmBuffer)
+        {
+            if (pcmBuffer == null || pcmBuffer.Length < 2)
+            {
+                return 0f;
+            }
+
+            var samples = pcmBuffer.Length / 2;
+            double accumulator = 0d;
+            for (var i = 0; i < pcmBuffer.Length; i += 2)
+            {
+                var sample = (short)(pcmBuffer[i] | (pcmBuffer[i + 1] << 8));
+                accumulator += Math.Abs(sample) / (double)short.MaxValue;
+            }
+
+            return samples == 0 ? 0f : (float)(accumulator / samples);
+        }
+
+        private int ResolveAudioDeviceNumber()
+        {
+            if (cachedAudioDevices.Count == 0)
+            {
+                return -1;
+            }
+
+            if (string.IsNullOrEmpty(selectedAudioDeviceId))
+            {
+                var fallback = cachedAudioDevices.FirstOrDefault(d => d.DeviceNumber >= 0);
+                return fallback?.DeviceNumber ?? -1;
+            }
+
+            var preferred = cachedAudioDevices.FirstOrDefault(d => string.Equals(d.Id, selectedAudioDeviceId, StringComparison.OrdinalIgnoreCase));
+            return preferred?.DeviceNumber ?? -1;
         }
 
         private void OnCameraFrame(Touchless.Vision.Contracts.IFrameSource source, Touchless.Vision.Contracts.Frame frame, double fps)
@@ -497,7 +618,14 @@ namespace MultiCom.Client
                 }
 
                 bitmap.Dispose();
-                var endpoint = videoEndpoint;
+
+                if (buffer.Length > MAX_DATAGRAM_BYTES)
+                {
+                    Log(string.Format("[WARN] Dropping frame ({0} bytes) above network budget.", buffer.Length));
+                    return;
+                }
+
+                var endpoint = ResolveTransmissionEndpoint(videoEndpoint);
                 var totalSegments = (int)Math.Ceiling((double)buffer.Length / PAYLOAD_BYTES);
                 var timestamp = DateTime.UtcNow.Ticks;
                 for (var segment = 0; segment < totalSegments; segment++)
@@ -516,15 +644,52 @@ namespace MultiCom.Client
                     var datagram = new byte[headerBytes.Length + chunkLength];
                     Buffer.BlockCopy(headerBytes, 0, datagram, 0, headerBytes.Length);
                     Buffer.BlockCopy(chunk, 0, datagram, headerBytes.Length, chunkLength);
-                    await videoSender.SendAsync(datagram, datagram.Length, endpoint).ConfigureAwait(false);
+                    await SendVideoSegmentAsync(datagram, endpoint).ConfigureAwait(false);
                 }
 
-                performanceTracker.RegisterFrame(DateTime.UtcNow, 0);
                 frameNumber++;
             }
             catch (Exception ex)
             {
                 Log("[ERROR] Broadcast: " + ex.Message);
+            }
+        }
+
+        private async Task SendVideoSegmentAsync(byte[] datagram, IPEndPoint multicastEndpoint)
+        {
+            if (videoSender == null || datagram == null || multicastEndpoint == null)
+            {
+                return;
+            }
+
+            var unicastAddress = serverUnicastAddress;
+            if (unicastAddress != null)
+            {
+                try
+                {
+                    var unicastTarget = new IPEndPoint(unicastAddress, multicastEndpoint.Port);
+                    await videoSender.SendAsync(datagram, datagram.Length, unicastTarget).ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                catch (SocketException ex)
+                {
+                    Log("[WARN] Video unicast send failed: " + ex.Message);
+                }
+            }
+
+            try
+            {
+                await videoSender.SendAsync(datagram, datagram.Length, multicastEndpoint).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (SocketException ex)
+            {
+                Log("[WARN] Video multicast send failed: " + ex.Message);
             }
         }
 
@@ -559,6 +724,16 @@ namespace MultiCom.Client
                 heartbeatTimer.Dispose();
                 heartbeatTimer = null;
             }
+        }
+
+        private IPEndPoint ResolveTransmissionEndpoint(IPEndPoint multicastEndpoint)
+        {
+            if (serverUnicastAddress != null)
+            {
+                return new IPEndPoint(serverUnicastAddress, multicastEndpoint.Port);
+            }
+
+            return multicastEndpoint;
         }
 
         private void SendPresence(PresenceOpcode opcode, bool force = false)
@@ -625,15 +800,23 @@ namespace MultiCom.Client
             return "Anon";
         }
 
-        private void ApplySnapshot(PresenceMessage snapshot)
+        private void ApplySnapshot(PresenceMessage snapshot, IPAddress snapshotOrigin)
         {
             lastServerSnapshotUtc = DateTime.UtcNow;
-            if (!serverReachable)
+            var wasOffline = !serverReachable || serverDisconnectNotified;
+            serverReachable = true;
+            serverDisconnectNotified = false;
+            if (wasOffline)
             {
-                serverReachable = true;
                 Log("[INFO] Synchronized with server.");
             }
 
+            if (snapshotOrigin != null && !Equals(serverUnicastAddress, snapshotOrigin))
+            {
+                serverUnicastAddress = snapshotOrigin;
+            }
+
+            List<Guid> activeClients;
             lock (presenceGate)
             {
                 presenceRecords.Clear();
@@ -641,7 +824,11 @@ namespace MultiCom.Client
                 {
                     presenceRecords[record.ClientId] = record;
                 }
+
+                activeClients = presenceRecords.Keys.ToList();
             }
+
+            audioPlayback?.Prune(activeClients);
 
             BeginInvoke(new Action(() =>
             {
@@ -760,170 +947,265 @@ namespace MultiCom.Client
             }
         }
 
-        private void ListenVideoLoop(CancellationToken token)
+        private void ListenVideoLoop(UdpClient udp, IPEndPoint endpoint, CancellationToken token)
         {
-            var endpoint = videoEndpoint;
-            using (var udp = CreateMulticastListener(endpoint))
+            if (udp == null)
             {
-                udp.Client.ReceiveTimeout = 1000;
-                var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
-                while (!token.IsCancellationRequested)
-                {
-                    byte[] buffer;
-                    try
-                    {
-                        buffer = udp.Receive(ref remote);
-                    }
-                    catch (SocketException ex)
-                    {
-                        if (ex.SocketErrorCode == SocketError.TimedOut)
-                        {
-                            continue;
-                        }
+                return;
+            }
 
-                        Log("[ERROR] Video listener: " + ex.Message);
+            udp.Client.ReceiveTimeout = 1000;
+            var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
+            while (!token.IsCancellationRequested)
+            {
+                byte[] buffer;
+                try
+                {
+                    buffer = udp.Receive(ref remote);
+                }
+                catch (SocketException ex)
+                {
+                    if (ex.SocketErrorCode == SocketError.TimedOut)
+                    {
                         continue;
                     }
-                    catch (ObjectDisposedException)
+
+                    if (ex.SocketErrorCode == SocketError.Interrupted)
                     {
                         break;
                     }
 
-                    VideoPacket packet;
-                    if (!VideoPacket.TryParse(buffer, buffer.Length, out packet))
+                    Log("[ERROR] Video listener: " + ex.Message);
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+
+                VideoPacket packet;
+                if (!VideoPacket.TryParse(buffer, buffer.Length, out packet))
+                {
+                    performanceTracker.RegisterLoss(1);
+                    continue;
+                }
+
+                if (packet.Header.SenderId == clientId)
+                {
+                    continue;
+                }
+
+                var receivedAt = DateTime.UtcNow;
+                var latencyMs = 0d;
+                if (packet.Header.TimestampTicks > 0)
+                {
+                    try
                     {
-                        performanceTracker.RegisterLoss(1);
-                        continue;
+                        var sentAt = new DateTime(packet.Header.TimestampTicks, DateTimeKind.Utc);
+                        latencyMs = Math.Max(0d, (receivedAt - sentAt).TotalMilliseconds);
                     }
-
-                    if (packet.Header.SenderId == clientId)
+                    catch (ArgumentOutOfRangeException)
                     {
-                        continue;
                     }
+                }
 
-                    var receivedAt = DateTime.UtcNow;
-                    byte[] frameBytes;
-                    int lostSegments;
-                    if (frameAssembler.TryAdd(packet, receivedAt, out frameBytes, out lostSegments))
-                    {
-                        if (lostSegments > 0)
-                        {
-                            performanceTracker.RegisterLoss(lostSegments);
-                        }
+                performanceTracker.RegisterFrame(receivedAt, latencyMs);
 
-                        try
-                        {
-                            using (var ms = new MemoryStream(frameBytes))
-                            {
-                                var bitmap = new Bitmap(ms);
-                                var senderName = ResolveDisplayName(packet.Header.SenderId);
-                                BeginInvoke(new Action(() => RenderFrame(packet.Header.SenderId, senderName, bitmap)));
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Log("[ERROR] Frame decode: " + ex.Message);
-                            performanceTracker.RegisterLoss(1);
-                        }
-
-                        var latencyMs = (receivedAt - new DateTime(packet.Header.TimestampTicks, DateTimeKind.Utc)).TotalMilliseconds;
-                        performanceTracker.RegisterFrame(receivedAt, latencyMs);
-                    }
-                    else if (lostSegments > 0)
+                byte[] frameBytes;
+                int lostSegments;
+                if (frameAssembler.TryAdd(packet, receivedAt, out frameBytes, out lostSegments))
+                {
+                    if (lostSegments > 0)
                     {
                         performanceTracker.RegisterLoss(lostSegments);
                     }
+
+                    try
+                    {
+                        using (var ms = new MemoryStream(frameBytes))
+                        {
+                            var bitmap = new Bitmap(ms);
+                            var senderName = ResolveDisplayName(packet.Header.SenderId);
+                            BeginInvoke(new Action(() => RenderFrame(packet.Header.SenderId, senderName, bitmap)));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("[ERROR] Frame decode: " + ex.Message);
+                        performanceTracker.RegisterLoss(1);
+                    }
+                }
+                else if (lostSegments > 0)
+                {
+                    performanceTracker.RegisterLoss(lostSegments);
                 }
             }
         }
 
-        private void ListenChatLoop(CancellationToken token)
+        private void ListenChatLoop(UdpClient udp, IPEndPoint endpoint, CancellationToken token)
         {
-            var endpoint = chatEndpoint;
-            using (var udp = CreateMulticastListener(endpoint))
+            if (udp == null)
             {
-                udp.Client.ReceiveTimeout = 1000;
-                var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
-                while (!token.IsCancellationRequested)
-                {
-                    byte[] buffer;
-                    try
-                    {
-                        buffer = udp.Receive(ref remote);
-                    }
-                    catch (SocketException ex)
-                    {
-                        if (ex.SocketErrorCode == SocketError.TimedOut)
-                        {
-                            continue;
-                        }
+                return;
+            }
 
-                        Log("[ERROR] Chat listener: " + ex.Message);
+            udp.Client.ReceiveTimeout = 1000;
+            var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
+            while (!token.IsCancellationRequested)
+            {
+                byte[] buffer;
+                try
+                {
+                    buffer = udp.Receive(ref remote);
+                }
+                catch (SocketException ex)
+                {
+                    if (ex.SocketErrorCode == SocketError.TimedOut)
+                    {
                         continue;
                     }
-                    catch (ObjectDisposedException)
+
+                    if (ex.SocketErrorCode == SocketError.Interrupted)
                     {
                         break;
                     }
 
-                    ChatEnvelope envelope;
-                    if (!ChatEnvelope.TryParse(buffer, out envelope))
+                    Log("[ERROR] Chat listener: " + ex.Message);
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+
+                ChatEnvelope envelope;
+                if (!ChatEnvelope.TryParse(buffer, out envelope))
+                {
+                    continue;
+                }
+
+                if (envelope.SenderId == clientId)
+                {
+                    continue;
+                }
+
+                if (!ShouldRenderChat(envelope))
+                {
+                    continue;
+                }
+
+                BeginInvoke(new Action(() => AppendChat(envelope, false)));
+            }
+        }
+
+        private void ListenAudioLoop(UdpClient udp, IPEndPoint endpoint, CancellationToken token)
+        {
+            if (udp == null)
+            {
+                return;
+            }
+
+            udp.Client.ReceiveTimeout = 1000;
+            var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
+            while (!token.IsCancellationRequested)
+            {
+                byte[] buffer;
+                try
+                {
+                    buffer = udp.Receive(ref remote);
+                }
+                catch (SocketException ex)
+                {
+                    if (ex.SocketErrorCode == SocketError.TimedOut)
                     {
                         continue;
                     }
 
-                    if (envelope.SenderId == clientId)
+                    if (ex.SocketErrorCode == SocketError.Interrupted)
                     {
-                        continue;
+                        break;
                     }
 
-                    BeginInvoke(new Action(() => AppendChat(envelope, false)));
+                    Log("[ERROR] Audio listener: " + ex.Message);
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+
+                AudioFrame frame;
+                if (!AudioFrame.TryParse(buffer, buffer.Length, out frame))
+                {
+                    continue;
+                }
+
+                if (frame.SenderId == clientId)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    byte[] pcm;
+                    ALawDecoder.ALawDecode(frame.Payload, out pcm);
+                    audioPlayback?.PushSamples(frame.SenderId, pcm);
+                }
+                catch (Exception ex)
+                {
+                    Log("[ERROR] Audio playback: " + ex.Message);
                 }
             }
         }
 
-        private void ListenControlLoop(CancellationToken token)
+        private void ListenControlLoop(UdpClient udp, IPEndPoint endpoint, CancellationToken token)
         {
-            var endpoint = controlEndpoint;
-            using (var udp = CreateMulticastListener(endpoint))
+            if (udp == null)
             {
-                udp.Client.ReceiveTimeout = 1000;
-                var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
-                while (!token.IsCancellationRequested)
-                {
-                    byte[] buffer;
-                    try
-                    {
-                        buffer = udp.Receive(ref remote);
-                    }
-                    catch (SocketException ex)
-                    {
-                        if (ex.SocketErrorCode == SocketError.TimedOut)
-                        {
-                            continue;
-                        }
+                return;
+            }
 
-                        Log("[ERROR] Control listener: " + ex.Message);
+            udp.Client.ReceiveTimeout = 1000;
+            var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
+            while (!token.IsCancellationRequested)
+            {
+                byte[] buffer;
+                try
+                {
+                    buffer = udp.Receive(ref remote);
+                }
+                catch (SocketException ex)
+                {
+                    if (ex.SocketErrorCode == SocketError.TimedOut)
+                    {
                         continue;
                     }
-                    catch (ObjectDisposedException)
+
+                    if (ex.SocketErrorCode == SocketError.Interrupted)
                     {
                         break;
                     }
 
-                    PresenceMessage envelope;
-                    if (!PresenceMessage.TryParse(buffer, out envelope))
-                    {
-                        continue;
-                    }
-
-                    if (envelope.Kind != PresenceOpcode.Snapshot)
-                    {
-                        continue;
-                    }
-
-                    ApplySnapshot(envelope);
+                    Log("[ERROR] Control listener: " + ex.Message);
+                    continue;
                 }
+                catch (ObjectDisposedException)
+                {
+                    break;
+                }
+
+                PresenceMessage envelope;
+                if (!PresenceMessage.TryParse(buffer, out envelope))
+                {
+                    continue;
+                }
+
+                if (envelope.Kind != PresenceOpcode.Snapshot)
+                {
+                    continue;
+                }
+
+                ApplySnapshot(envelope, remote.Address);
             }
         }
 
@@ -979,14 +1261,54 @@ namespace MultiCom.Client
             tile.Caption.ForeColor = isSpeaking ? Color.White : Color.LightGray;
         }
 
+        private bool ShouldRenderChat(ChatEnvelope envelope)
+        {
+            if (envelope == null || envelope.MessageId == Guid.Empty)
+            {
+                return true;
+            }
+
+            lock (chatHistoryGate)
+            {
+                if (!chatMessageCache.Add(envelope.MessageId))
+                {
+                    return false;
+                }
+
+                chatMessageOrder.AddLast(envelope.MessageId);
+                if (chatMessageCache.Count > CHAT_HISTORY_LIMIT)
+                {
+                    var oldest = chatMessageOrder.First;
+                    if (oldest != null)
+                    {
+                        chatMessageOrder.RemoveFirst();
+                        chatMessageCache.Remove(oldest.Value);
+                    }
+                }
+            }
+
+            return true;
+        }
+
         private void AppendChat(ChatEnvelope envelope, bool isLocal)
         {
+            if (envelope == null || listChat == null)
+            {
+                return;
+            }
+
             var prefix = isLocal ? "You" : envelope.Sender;
-            var line = string.Format("[{0:HH:mm}] {1}: {2}", envelope.TimestampUtc, prefix, envelope.Message);
-            listChat.Items.Insert(0, line);
+            var timestamp = envelope.TimestampUtc.ToLocalTime();
+            var line = string.Format("[{0:HH:mm}] {1}: {2}", timestamp, prefix, envelope.Message);
+            listChat.Items.Add(line);
             while (listChat.Items.Count > 200)
             {
-                listChat.Items.RemoveAt(listChat.Items.Count - 1);
+                listChat.Items.RemoveAt(0);
+            }
+
+            if (listChat.Items.Count > 0)
+            {
+                listChat.TopIndex = listChat.Items.Count - 1;
             }
         }
 
@@ -1019,11 +1341,7 @@ namespace MultiCom.Client
 
             try
             {
-                if (chatSender != null)
-                {
-                    chatSender.Send(payload, payload.Length, chatEndpoint);
-                }
-
+                BroadcastChatPayload(payload);
                 AppendChat(envelope, true);
                 txtMessage.Clear();
             }
@@ -1033,19 +1351,62 @@ namespace MultiCom.Client
             }
         }
 
+        private void BroadcastChatPayload(byte[] payload)
+        {
+            if (chatSender == null || payload == null || payload.Length == 0)
+            {
+                return;
+            }
+
+            var multicastTarget = chatEndpoint;
+            var unicastAddress = serverUnicastAddress;
+            if (unicastAddress != null)
+            {
+                try
+                {
+                    var unicastTarget = new IPEndPoint(unicastAddress, multicastTarget.Port);
+                    chatSender.Send(payload, payload.Length, unicastTarget);
+                }
+                catch (SocketException ex)
+                {
+                    Log("[WARN] Chat unicast send failed: " + ex.Message);
+                }
+            }
+
+            try
+            {
+                chatSender.Send(payload, payload.Length, multicastTarget);
+            }
+            catch (Exception ex)
+            {
+                Log("[ERROR] Chat multicast send: " + ex.Message);
+            }
+        }
+
         private void OnUiTimerTick(object sender, EventArgs e)
         {
             var snapshot = performanceTracker.BuildSnapshot();
-            lblFps.Text = string.Format("FPS: {0:F1}", snapshot.FramesPerSecond);
-            lblLatency.Text = string.Format("Latency: {0:F1} ms", snapshot.AverageLatencyMs);
-            lblJitter.Text = string.Format("Jitter: {0:F1} ms", snapshot.JitterMs);
-            lblLoss.Text = string.Format("Loss: {0} pkts", snapshot.LostPackets);
+            if (snapshot.HasSamples)
+            {
+                lblFps.Text = string.Format("FPS: {0:F1}", snapshot.FramesPerSecond);
+                lblLatency.Text = string.Format("Latency: {0:F1} ms", snapshot.AverageLatencyMs);
+                lblJitter.Text = string.Format("Jitter: {0:F1} ms", snapshot.JitterMs);
+                lblLoss.Text = string.Format("Loss: {0} pkts", snapshot.LostPackets);
+            }
+            else
+            {
+                lblFps.Text = "FPS: --";
+                lblLatency.Text = "Latency: --";
+                lblJitter.Text = "Jitter: --";
+                lblLoss.Text = "Loss: --";
+            }
+
             CheckServerHealth();
         }
 
         private void CheckServerHealth()
         {
-            if (videoCts == null && chatCts == null && controlCts == null)
+            if ((videoCts == null && chatCts == null && controlCts == null) || !ShouldMonitorServer())
             {
                 return;
             }
@@ -1055,16 +1416,17 @@ namespace MultiCom.Client
             {
                 if (lastServerSnapshotUtc != DateTime.MinValue && now - lastServerSnapshotUtc > serverTimeoutWindow)
                 {
-                    HandleServerTimeout("Lost connection to the MultiCom server. The client has been disconnected.");
+                    serverReachable = false;
+                    NotifyServerTimeout(string.Format("Lost connection to the MultiCom server at {0}.", serverUnicastAddress));
                 }
             }
             else if (connectionStartedUtc != DateTime.MinValue && now - connectionStartedUtc > serverGraceWindow)
             {
-                HandleServerTimeout("The MultiCom server is not reachable. Please ensure the server is running.");
+                NotifyServerTimeout(string.Format("The MultiCom server at {0} is not reachable. Verify it is running and reachable on the network.", serverUnicastAddress));
             }
         }
 
-        private void HandleServerTimeout(string message)
+        private void NotifyServerTimeout(string message)
         {
             if (serverDisconnectNotified)
             {
@@ -1072,11 +1434,8 @@ namespace MultiCom.Client
             }
 
             serverDisconnectNotified = true;
-            suppressServerAlertReset = true;
-            StopNetworking("[WARN] " + message);
-            suppressServerAlertReset = false;
-            MessageBox.Show(this, message, "Server unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            serverDisconnectNotified = false;
+            Log("[WARN] " + message);
+            BeginInvoke(new Action(() => MessageBox.Show(this, message, "Server unavailable", MessageBoxButtons.OK, MessageBoxIcon.Warning)));
         }
 
         private void CancelTokenSource(ref CancellationTokenSource source)
@@ -1106,6 +1465,32 @@ namespace MultiCom.Client
 
             client.Close();
             client = null;
+        }
+
+        private void StopListener(ref Task task, ref UdpClient listener)
+        {
+            CloseClient(ref listener);
+            WaitListenerTask(task);
+            task = null;
+        }
+
+        private void WaitListenerTask(Task task)
+        {
+            if (task == null)
+            {
+                return;
+            }
+
+            try
+            {
+                task.Wait(TimeSpan.FromSeconds(1));
+            }
+            catch (AggregateException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
         }
 
         private UdpClient CreateMulticastListener(IPEndPoint endpoint)
@@ -1187,7 +1572,12 @@ namespace MultiCom.Client
 
         private bool IsConnected()
         {
-            return videoCts != null || chatCts != null || controlCts != null;
+            return videoCts != null || chatCts != null || controlCts != null || audioCts != null;
+        }
+
+        private bool ShouldMonitorServer()
+        {
+            return serverUnicastAddress != null;
         }
 
         private ClientPreferences BuildPreferences()
@@ -1218,6 +1608,7 @@ namespace MultiCom.Client
 
             var interfaceChanged = !Equals(preferredInterfaceAddress, preferences.PreferredInterface);
             var serverChanged = !Equals(serverUnicastAddress, preferences.ServerAddress);
+            var previousAudioDeviceId = selectedAudioDeviceId;
 
             selectedCameraIndex = availableCameras.Count == 0 ? -1 : Math.Max(0, Math.Min(preferences.CameraIndex, availableCameras.Count - 1));
             selectedAudioDeviceId = string.IsNullOrEmpty(preferences.AudioDeviceId) ? null : preferences.AudioDeviceId;
@@ -1227,10 +1618,19 @@ namespace MultiCom.Client
             jpegQuality = Math.Max(10, Math.Min(100, preferences.JpegQuality));
             preferredInterfaceAddress = preferences.PreferredInterface;
             serverUnicastAddress = preferences.ServerAddress;
+            if (serverChanged)
+            {
+                serverReachable = false;
+                lastServerSnapshotUtc = DateTime.MinValue;
+                serverDisconnectNotified = false;
+            }
+            var audioDeviceChanged = !string.Equals(previousAudioDeviceId, selectedAudioDeviceId, StringComparison.OrdinalIgnoreCase);
 
             LoadAudioDevices();
-            StopAudioMonitor();
-            EnsureAudioMonitor();
+            if (audioDeviceChanged)
+            {
+                RestartAudioCapture();
+            }
 
             var broadcasting = frameSource != null;
             if (broadcasting)
@@ -1310,6 +1710,8 @@ namespace MultiCom.Client
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             StopNetworking("[INFO] Closing application.");
+            audioPlayback?.Dispose();
+            audioPlayback = null;
             base.OnFormClosing(e);
         }
     }

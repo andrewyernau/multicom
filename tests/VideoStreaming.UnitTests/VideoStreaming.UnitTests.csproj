@@ -23,4 +23,8 @@
     <Using Include="FluentAssertions" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\project\MultiCom.Shared\MultiCom.Shared.csproj" />
+  </ItemGroup>
+
 </Project>

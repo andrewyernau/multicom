@@ -9,19 +9,22 @@ namespace MultiCom.Shared.Networking
         private readonly double jitterMs;
         private readonly double framesPerSecond;
         private readonly int lostPackets;
+        private readonly bool hasSamples;
 
-        public PerformanceSnapshot(double averageLatencyMs, double jitterMs, double framesPerSecond, int lostPackets)
+        public PerformanceSnapshot(double averageLatencyMs, double jitterMs, double framesPerSecond, int lostPackets, bool hasSamples)
         {
             this.averageLatencyMs = averageLatencyMs;
             this.jitterMs = jitterMs;
             this.framesPerSecond = framesPerSecond;
             this.lostPackets = lostPackets;
+            this.hasSamples = hasSamples;
         }
 
         public double AverageLatencyMs { get { return averageLatencyMs; } }
         public double JitterMs { get { return jitterMs; } }
         public double FramesPerSecond { get { return framesPerSecond; } }
         public int LostPackets { get { return lostPackets; } }
+        public bool HasSamples { get { return hasSamples; } }
     }
 
     public sealed class PerformanceTracker
@@ -95,13 +98,14 @@ namespace MultiCom.Shared.Networking
                     averageLatency += sample;
                 }
 
-                if (latencySamples.Count > 0)
+                var sampleCount = latencySamples.Count;
+                if (sampleCount > 0)
                 {
-                    averageLatency /= latencySamples.Count;
+                    averageLatency /= sampleCount;
                 }
 
                 var jitter = jitterSamples > 0 ? jitterAccumulator / jitterSamples : 0d;
-                return new PerformanceSnapshot(averageLatency, jitter, currentFps, lostPackets);
+                return new PerformanceSnapshot(averageLatency, jitter, currentFps, lostPackets, sampleCount > 0);
             }
         }
 

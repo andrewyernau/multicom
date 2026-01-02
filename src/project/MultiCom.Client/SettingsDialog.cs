@@ -65,10 +65,10 @@ namespace MultiCom.Client
             comboInterfaces = CreateComboBox();
             txtServerIp = CreateTextBox();
 
-            numWidth = CreateNumeric(160, 1920, 640);
-            numHeight = CreateNumeric(120, 1080, 360);
-            numFps = CreateNumeric(5, 60, 20);
-            numQuality = CreateNumeric(10, 100, 80);
+            numWidth = CreateNumeric(160, 1920, 320);
+            numHeight = CreateNumeric(120, 1080, 240);
+            numFps = CreateNumeric(5, 60, 15);
+            numQuality = CreateNumeric(10, 100, 70);
 
             AddRow(layout, "Display name", txtDisplayName, 0);
             AddRow(layout, "Camera", comboCameras, 1);
