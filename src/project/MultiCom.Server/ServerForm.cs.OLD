@@ -15,6 +15,7 @@ namespace MultiCom.Server
     {
         private readonly object rosterGate = new object();
         private readonly Dictionary<Guid, PresenceRecord> roster = new Dictionary<Guid, PresenceRecord>();
+        private readonly Dictionary<Guid, IPEndPoint> clientEndpoints = new Dictionary<Guid, IPEndPoint>();
         private readonly SemaphoreSlim snapshotLock = new SemaphoreSlim(1, 1);
         private readonly IPEndPoint controlEndpoint = MulticastChannels.BuildControlEndpoint();
         private CancellationTokenSource presenceToken;
@@ -22,8 +23,16 @@ namespace MultiCom.Server
         private UdpClient snapshotSender;
         private DateTime lastSnapshotUtc = DateTime.MinValue;
         private int snapshotsBroadcast;
-        // [AGENT] ELIMINADO: Relay innecesario en multicast P2P
-        // Los clientes envían directamente a multicast, no necesitan relay server
+        private CancellationTokenSource relayToken;
+        private Task videoRelayTask;
+        private Task chatRelayTask;
+        private Task audioRelayTask;
+        private UdpClient videoRelayReceiver;
+        private UdpClient chatRelayReceiver;
+        private UdpClient audioRelayReceiver;
+        private UdpClient videoRelaySender;
+        private UdpClient chatRelaySender;
+        private UdpClient audioRelaySender;
 
         public ServerForm()
         {
@@ -69,33 +78,35 @@ namespace MultiCom.Server
             }
 
             presenceToken.Cancel();
-            try
+            StopRelayServices();
+
+            if (snapshotSender != null)
             {
-                if (presenceTask != null)
+                try
                 {
-                    presenceTask.Wait(TimeSpan.FromSeconds(2));
+                    snapshotSender.Close();
+                    snapshotSender.Dispose();
                 }
+                catch
+                {
+                }
+                snapshotSender = null;
             }
-            catch (AggregateException)
+            
+            if (presenceTask != null && !presenceTask.IsCompleted)
             {
+                presenceTask.Wait(50);
             }
 
             presenceTask = null;
             presenceToken.Dispose();
             presenceToken = null;
 
-            if (snapshotSender != null)
-            {
-                snapshotSender.Close();
-                snapshotSender = null;
-            }
-
             lock (rosterGate)
             {
                 roster.Clear();
+                clientEndpoints.Clear();
             }
-
-            // [AGENT] ELIMINADO: StopRelayServices() - relay innecesario
 
             snapshotsBroadcast = 0;
             lastSnapshotUtc = DateTime.MinValue;
@@ -131,8 +142,8 @@ namespace MultiCom.Server
             lastSnapshotUtc = DateTime.MinValue;
             UpdateRosterList();
             UpdateMetrics();
-            // [AGENT] ELIMINADO: StartRelayServices() - relay innecesario
-            Log("[INFO] Presence service started (NO relay - clients use direct multicast).");
+            StartRelayServices();
+            Log("[INFO] Presence service started.");
             var _ = BroadcastSnapshotAsync();
         }
 
@@ -147,9 +158,11 @@ namespace MultiCom.Server
                 while (!token.IsCancellationRequested)
                 {
                     byte[] buffer;
+                    IPEndPoint clientEndpoint;
                     try
                     {
                         buffer = udp.Receive(ref remote);
+                        clientEndpoint = new IPEndPoint(remote.Address, 0);
                     }
                     catch (SocketException ex)
                     {
@@ -175,6 +188,18 @@ namespace MultiCom.Server
                     if (message.Kind == PresenceOpcode.Snapshot)
                     {
                         continue;
+                    }
+
+                    lock (rosterGate)
+                    {
+                        if (message.Kind != PresenceOpcode.Goodbye)
+                        {
+                            clientEndpoints[message.ClientId] = clientEndpoint;
+                        }
+                        else
+                        {
+                            clientEndpoints.Remove(message.ClientId);
+                        }
                     }
 
                     var changed = ApplyPresence(message);
@@ -267,9 +292,198 @@ namespace MultiCom.Server
             }
         }
 
-        // [AGENT] ELIMINADOS: Métodos de relay innecesarios (StartRelayServices, StopRelayServices,
-        // CreateRelayReceiver, CreateRelaySender, StartRelayLoop, CloseRelayClient, WaitRelayTask)
-        // En multicast P2P, los clientes envían directamente al grupo - no necesitan relay server
+        private void StartRelayServices()
+        {
+            if (relayToken != null)
+            {
+                return;
+            }
+
+            relayToken = new CancellationTokenSource();
+            var token = relayToken.Token;
+
+            try
+            {
+                videoRelayReceiver = CreateRelayReceiver(MulticastChannels.VIDEO_PORT);
+                chatRelayReceiver = CreateRelayReceiver(MulticastChannels.CHAT_PORT);
+                audioRelayReceiver = CreateRelayReceiver(MulticastChannels.AUDIO_PORT);
+
+                videoRelaySender = CreateRelaySender(MulticastChannels.BuildVideoEndpoint().Address);
+                chatRelaySender = CreateRelaySender(MulticastChannels.BuildChatEndpoint().Address);
+                audioRelaySender = CreateRelaySender(MulticastChannels.BuildAudioEndpoint().Address);
+
+                videoRelayTask = StartRelayLoop(videoRelayReceiver, videoRelaySender, MulticastChannels.BuildVideoEndpoint(), "Video", token);
+                chatRelayTask = StartRelayLoop(chatRelayReceiver, chatRelaySender, MulticastChannels.BuildChatEndpoint(), "Chat", token);
+                audioRelayTask = StartRelayLoop(audioRelayReceiver, audioRelaySender, MulticastChannels.BuildAudioEndpoint(), "Audio", token);
+
+                Log("[INFO] Relay services started.");
+            }
+            catch (Exception ex)
+            {
+                Log("[ERROR] Unable to start relay services: " + ex.Message);
+                StopRelayServices();
+            }
+        }
+
+        private void StopRelayServices()
+        {
+            if (relayToken == null)
+            {
+                return;
+            }
+
+            relayToken.Cancel();
+
+            CloseRelayClient(ref videoRelayReceiver);
+            CloseRelayClient(ref chatRelayReceiver);
+            CloseRelayClient(ref audioRelayReceiver);
+            CloseRelayClient(ref videoRelaySender);
+            CloseRelayClient(ref chatRelaySender);
+            CloseRelayClient(ref audioRelaySender);
+
+            WaitRelayTask(videoRelayTask);
+            WaitRelayTask(chatRelayTask);
+            WaitRelayTask(audioRelayTask);
+
+            relayToken.Dispose();
+            relayToken = null;
+            videoRelayTask = null;
+            chatRelayTask = null;
+            audioRelayTask = null;
+            Log("[INFO] Relay services stopped.");
+        }
+
+        private static UdpClient CreateRelayReceiver(int port)
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            socket.Bind(new IPEndPoint(IPAddress.Any, port));
+            
+            var udp = new UdpClient();
+            udp.Client = socket;
+            udp.Client.ReceiveTimeout = 1000;
+            
+            return udp;
+        }
+
+        private static UdpClient CreateRelaySender(IPAddress multicastAddress)
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 32);
+            socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+            
+            var udp = new UdpClient();
+            udp.Client = socket;
+            udp.MulticastLoopback = true;
+            udp.JoinMulticastGroup(multicastAddress);
+            
+            return udp;
+        }
+
+        private Task StartRelayLoop(UdpClient receiver, UdpClient sender, IPEndPoint target, string label, CancellationToken token)
+        {
+            return Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    UdpReceiveResult result;
+                    try
+                    {
+                        var receiveTask = receiver.ReceiveAsync();
+                        var delayTask = Task.Delay(500, token);
+                        var completedTask = await Task.WhenAny(receiveTask, delayTask).ConfigureAwait(false);
+                        
+                        if (completedTask == delayTask)
+                        {
+                            continue;
+                        }
+                        
+                        result = await receiveTask.ConfigureAwait(false);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        break;
+                    }
+                    catch (SocketException ex)
+                    {
+                        if (token.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        Log("[ERROR] " + label + " relay receive: " + ex.Message);
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (token.IsCancellationRequested)
+                        {
+                            break;
+                        }
+                        Log("[ERROR] " + label + " relay receive: " + ex.Message);
+                        continue;
+                    }
+
+                    List<IPEndPoint> clients;
+                    lock (rosterGate)
+                    {
+                        clients = clientEndpoints.Values.ToList();
+                    }
+
+                    foreach (var client in clients)
+                    {
+                        try
+                        {
+                            var unicastTarget = new IPEndPoint(client.Address, target.Port);
+                            await sender.SendAsync(result.Buffer, result.Buffer.Length, unicastTarget).ConfigureAwait(false);
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log("[ERROR] " + label + " relay send to " + client.Address + ": " + ex.Message);
+                        }
+                    }
+                }
+            }, token);
+        }
+
+        private void CloseRelayClient(ref UdpClient client)
+        {
+            if (client == null)
+            {
+                return;
+            }
+
+            try
+            {
+                client.Client?.Close();
+                client.Close();
+                client.Dispose();
+            }
+            catch
+            {
+            }
+            
+            client = null;
+        }
+
+        private void WaitRelayTask(Task task)
+        {
+            if (task == null)
+            {
+                return;
+            }
+
+            if (task.IsCompleted)
+            {
+                return;
+            }
+
+            task.Wait(50);
+        }
 
         private bool CleanupInactiveClients()
         {
@@ -288,6 +502,7 @@ namespace MultiCom.Server
                 foreach (var clientId in removed)
                 {
                     roster.Remove(clientId);
+                    clientEndpoints.Remove(clientId);
                 }
             }
 
