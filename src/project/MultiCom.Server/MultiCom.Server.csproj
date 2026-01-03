@@ -44,8 +44,18 @@
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
+    <Reference Include="System.ComponentModel.Composition">
+      <HintPath>..\lib\System.ComponentModel.Composition.dll</HintPath>
+    </Reference>
+    <Reference Include="Touchless.Vision">
+      <HintPath>..\lib\Touchless.Vision.dll</HintPath>
+    </Reference>
+    <Reference Include="WebCamLib">
+      <HintPath>..\lib\WebCamLib.dll</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Audio\SimpleAudioCapture.cs" />
     <Compile Include="ServerForm.cs">
       <SubType>Form</SubType>
     </Compile>

@@ -29,6 +29,8 @@ namespace MultiCom.Server
             this.components = new System.ComponentModel.Container();
             this.panelSidebar = new System.Windows.Forms.Panel();
             this.labelActions = new System.Windows.Forms.Label();
+            this.comboBoxCameras = new System.Windows.Forms.ComboBox();
+            this.labelCamera = new System.Windows.Forms.Label();
             this.btnRefreshCamera = new System.Windows.Forms.Button();
             this.btnStop = new System.Windows.Forms.Button();
             this.btnStart = new System.Windows.Forms.Button();
@@ -51,6 +53,8 @@ namespace MultiCom.Server
             this.panelSidebar.Controls.Add(this.btnRefreshCamera);
             this.panelSidebar.Controls.Add(this.btnStop);
             this.panelSidebar.Controls.Add(this.btnStart);
+            this.panelSidebar.Controls.Add(this.comboBoxCameras);
+            this.panelSidebar.Controls.Add(this.labelCamera);
             this.panelSidebar.Controls.Add(this.labelActions);
             this.panelSidebar.Dock = System.Windows.Forms.DockStyle.Left;
             this.panelSidebar.Location = new System.Drawing.Point(0, 0);
@@ -69,29 +73,51 @@ namespace MultiCom.Server
             this.labelActions.TabIndex = 0;
             this.labelActions.Text = "Presence coordination";
             // 
+            // labelCamera
+            // 
+            this.labelCamera.AutoSize = true;
+            this.labelCamera.ForeColor = Color.LightGray;
+            this.labelCamera.Location = new System.Drawing.Point(16, 48);
+            this.labelCamera.Name = "labelCamera";
+            this.labelCamera.Size = new System.Drawing.Size(120, 20);
+            this.labelCamera.TabIndex = 4;
+            this.labelCamera.Text = "Seleccionar Cámara:";
+            // 
+            // comboBoxCameras
+            // 
+            this.comboBoxCameras.BackColor = Color.FromArgb(47, 49, 54);
+            this.comboBoxCameras.ForeColor = Color.White;
+            this.comboBoxCameras.DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList;
+            this.comboBoxCameras.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
+            this.comboBoxCameras.FormattingEnabled = true;
+            this.comboBoxCameras.Location = new System.Drawing.Point(16, 72);
+            this.comboBoxCameras.Name = "comboBoxCameras";
+            this.comboBoxCameras.Size = new System.Drawing.Size(248, 28);
+            this.comboBoxCameras.TabIndex = 5;
+            // 
             // btnRefreshCamera
             // 
             this.btnRefreshCamera.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnRefreshCamera.ForeColor = Color.White;
-            this.btnRefreshCamera.Location = new System.Drawing.Point(16, 196);
+            this.btnRefreshCamera.Location = new System.Drawing.Point(16, 224);
             this.btnRefreshCamera.Name = "btnRefreshCamera";
             this.btnRefreshCamera.Size = new System.Drawing.Size(248, 40);
             this.btnRefreshCamera.TabIndex = 3;
-            this.btnRefreshCamera.Text = "Broadcast snapshot";
+            this.btnRefreshCamera.Text = "Refresh Cameras";
             this.btnRefreshCamera.UseVisualStyleBackColor = true;
-            this.btnRefreshCamera.Click += new System.EventHandler(this.OnRefreshCameraClick);
+            this.btnRefreshCamera.Click += new System.EventHandler(this.OnRefreshClick);
             // 
             // btnStop
             // 
             this.btnStop.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnStop.ForeColor = Color.White;
-            this.btnStop.Location = new System.Drawing.Point(16, 140);
+            this.btnStop.Location = new System.Drawing.Point(16, 168);
             this.btnStop.Name = "btnStop";
             this.btnStop.Size = new System.Drawing.Size(248, 40);
             this.btnStop.TabIndex = 2;
             this.btnStop.Text = "Stop service";
             this.btnStop.UseVisualStyleBackColor = true;
-            this.btnStop.Click += new System.EventHandler(this.OnStopStreaming);
+            this.btnStop.Click += new System.EventHandler(this.OnStopClick);
             // 
             // btnStart
             // 
@@ -99,13 +125,13 @@ namespace MultiCom.Server
             this.btnStart.FlatAppearance.BorderSize = 0;
             this.btnStart.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
             this.btnStart.ForeColor = Color.White;
-            this.btnStart.Location = new System.Drawing.Point(16, 84);
+            this.btnStart.Location = new System.Drawing.Point(16, 112);
             this.btnStart.Name = "btnStart";
             this.btnStart.Size = new System.Drawing.Size(248, 40);
             this.btnStart.TabIndex = 1;
             this.btnStart.Text = "Start service";
             this.btnStart.UseVisualStyleBackColor = false;
-            this.btnStart.Click += new System.EventHandler(this.OnStartStreaming);
+            this.btnStart.Click += new System.EventHandler(this.OnStartClick);
             // 
             // panelMetrics
             // 
@@ -221,6 +247,8 @@ namespace MultiCom.Server
 
         private System.Windows.Forms.Panel panelSidebar;
         private System.Windows.Forms.Label labelActions;
+        private System.Windows.Forms.Label labelCamera;
+        private System.Windows.Forms.ComboBox comboBoxCameras;
         private System.Windows.Forms.Button btnRefreshCamera;
         private System.Windows.Forms.Button btnStop;
         private System.Windows.Forms.Button btnStart;

@@ -48,6 +48,8 @@
     <Compile Include="Audio\AudioFormat.cs" />
     <Compile Include="Audio\ALawEncoder.cs" />
     <Compile Include="Audio\ALawDecoder.cs" />
+    <Compile Include="PacketHeader.cs" />
+    <Compile Include="ParticipantInfo.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

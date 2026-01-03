@@ -34,6 +34,7 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="Microsoft.VisualBasic" />
     <Reference Include="System" />
     <Reference Include="System.ComponentModel.Composition">
       <HintPath>..\WebcamUDPMulticast\WebCamWrapper\bin\Release\System.ComponentModel.Composition.dll</HintPath>
@@ -59,6 +60,7 @@
     <Compile Include="Audio\AudioDeviceCatalog.cs" />
     <Compile Include="Audio\AudioCaptureSession.cs" />
     <Compile Include="Audio\AudioPlaybackManager.cs" />
+    <Compile Include="Audio\SimpleAudioPlayer.cs" />
     <Compile Include="Audio\Wave\WaveInterop.cs" />
     <Compile Include="Audio\Wave\WavePrimitives.cs" />
     <Compile Include="Audio\Wave\WaveInComponents.cs" />

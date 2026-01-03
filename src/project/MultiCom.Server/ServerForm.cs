@@ -1,29 +1,43 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using MultiCom.Shared.Networking;
+using Touchless.Vision.Camera;
+using MultiCom.Shared.Audio;
+using MultiCom.Server.Audio;
 
 namespace MultiCom.Server
 {
     public partial class ServerForm : Form
     {
-        private readonly object rosterGate = new object();
-        private readonly Dictionary<Guid, PresenceRecord> roster = new Dictionary<Guid, PresenceRecord>();
-        private readonly SemaphoreSlim snapshotLock = new SemaphoreSlim(1, 1);
-        private readonly IPEndPoint controlEndpoint = MulticastChannels.BuildControlEndpoint();
-        private CancellationTokenSource presenceToken;
-        private Task presenceTask;
-        private UdpClient snapshotSender;
-        private DateTime lastSnapshotUtc = DateTime.MinValue;
-        private int snapshotsBroadcast;
-        // [AGENT] ELIMINADO: Relay innecesario en multicast P2P
-        // Los clientes envían directamente a multicast, no necesitan relay server
+        private const string MULTICAST_IP = "224.0.0.1";
+        private const int PORT_VIDEO = 8080;
+        private const int PORT_AUDIO = 8081;
+        private const int PORT_CHAT_OUT = 8082;
+        private const int PORT_CHAT_IN = 8083;
+        private const int CHUNK_SIZE = 2500;
+
+        private CameraFrameSource frameSource;
+        private UdpClient videoSender;
+        private UdpClient audioSender;
+        private UdpClient chatSender;
+        private UdpClient chatReceiver;
+        private IPEndPoint videoEndpoint;
+        private IPEndPoint audioEndpoint;
+        private IPEndPoint chatOutEndpoint;
+        private IPEndPoint chatInEndpoint;
+        private int frameNumber = 0;
+        private bool isStreaming = false;
+        private Task chatTask;
+        private CancellationTokenSource cts;
+        
+        private SimpleAudioCapture audioCapture;
 
         public ServerForm()
         {
@@ -33,377 +47,356 @@ namespace MultiCom.Server
         private void OnFormLoaded(object sender, EventArgs e)
         {
             ApplyDiscordPalette();
-            StartPresenceService();
-            streamingTimer.Start();
+            LoadCameras();
+            Log("Servidor listo. Presiona Start para transmitir.");
         }
 
-        private void ApplyDiscordPalette()
+        private void LoadCameras()
         {
-            btnStart.FlatAppearance.MouseOverBackColor = Color.FromArgb(114, 137, 218);
-            btnStop.FlatAppearance.BorderColor = Color.FromArgb(114, 118, 125);
-            btnStop.FlatAppearance.MouseOverBackColor = Color.FromArgb(80, 82, 90);
-            btnRefreshCamera.FlatAppearance.BorderColor = Color.FromArgb(114, 118, 125);
-            btnRefreshCamera.FlatAppearance.MouseOverBackColor = Color.FromArgb(80, 82, 90);
-        }
-
-        private async void OnRefreshCameraClick(object sender, EventArgs e)
-        {
-            await BroadcastSnapshotAsync();
-        }
-
-        private void OnStartStreaming(object sender, EventArgs e)
-        {
-            StartPresenceService();
-        }
-
-        private void OnStopStreaming(object sender, EventArgs e)
-        {
-            StopPresenceService();
-        }
-
-        private void StopPresenceService()
-        {
-            if (presenceToken == null)
-            {
-                return;
-            }
-
-            presenceToken.Cancel();
             try
             {
-                if (presenceTask != null)
+                comboBoxCameras.Items.Clear();
+                
+                int count = CameraService.AvailableCameras.Count();
+                Log($"Cámaras detectadas: {count}");
+                
+                foreach (Camera cam in CameraService.AvailableCameras)
                 {
-                    presenceTask.Wait(TimeSpan.FromSeconds(2));
+                    comboBoxCameras.Items.Add(cam);
+                    Log($"  - {cam.ToString()}");
                 }
-            }
-            catch (AggregateException)
-            {
-            }
-
-            presenceTask = null;
-            presenceToken.Dispose();
-            presenceToken = null;
-
-            if (snapshotSender != null)
-            {
-                snapshotSender.Close();
-                snapshotSender = null;
-            }
-
-            lock (rosterGate)
-            {
-                roster.Clear();
-            }
-
-            // [AGENT] ELIMINADO: StopRelayServices() - relay innecesario
-
-            snapshotsBroadcast = 0;
-            lastSnapshotUtc = DateTime.MinValue;
-            UpdateRosterList();
-            UpdateMetrics();
-            Log("[INFO] Presence service stopped.");
-        }
-
-        private void StartPresenceService()
-        {
-            if (presenceToken != null)
-            {
-                Log("[WARN] Presence service already running.");
-                return;
-            }
-
-            presenceToken = new CancellationTokenSource();
-            presenceTask = Task.Run(() => ListenPresenceLoop(presenceToken.Token));
-            snapshotSender = new UdpClient(AddressFamily.InterNetwork);
-            snapshotSender.ExclusiveAddressUse = false;
-            snapshotSender.MulticastLoopback = true;
-            snapshotSender.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            snapshotSender.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
-            snapshotSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 32);
-            snapshotSender.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
-            snapshotSender.JoinMulticastGroup(controlEndpoint.Address);
-            lock (rosterGate)
-            {
-                roster.Clear();
-            }
-
-            snapshotsBroadcast = 0;
-            lastSnapshotUtc = DateTime.MinValue;
-            UpdateRosterList();
-            UpdateMetrics();
-            // [AGENT] ELIMINADO: StartRelayServices() - relay innecesario
-            Log("[INFO] Presence service started (NO relay - clients use direct multicast).");
-            var _ = BroadcastSnapshotAsync();
-        }
-
-        private void ListenPresenceLoop(CancellationToken token)
-        {
-            var endpoint = MulticastChannels.BuildControlEndpoint();
-            using (var udp = CreateMulticastListener(endpoint))
-            {
-                udp.JoinMulticastGroup(endpoint.Address);
-                udp.Client.ReceiveTimeout = 1000;
-                var remote = new IPEndPoint(IPAddress.Any, endpoint.Port);
-                while (!token.IsCancellationRequested)
+                
+                if (count == 0)
                 {
-                    byte[] buffer;
-                    try
-                    {
-                        buffer = udp.Receive(ref remote);
-                    }
-                    catch (SocketException ex)
-                    {
-                        if (ex.SocketErrorCode == SocketError.TimedOut)
-                        {
-                            continue;
-                        }
-
-                        Log("[ERROR] Control loop: " + ex.Message);
-                        continue;
-                    }
-                    catch (ObjectDisposedException)
-                    {
-                        break;
-                    }
-
-                    PresenceMessage message;
-                    if (!PresenceMessage.TryParse(buffer, out message))
-                    {
-                        continue;
-                    }
-
-                    if (message.Kind == PresenceOpcode.Snapshot)
-                    {
-                        continue;
-                    }
-
-                    var changed = ApplyPresence(message);
-                    if (changed)
-                    {
-                        var _ = BroadcastSnapshotAsync();
-                    }
+                    Log("⚠️ No se detectaron cámaras. Verifica que la cámara esté conectada.");
                 }
-            }
-        }
-
-        private static UdpClient CreateMulticastListener(IPEndPoint endpoint)
-        {
-            var udp = new UdpClient(AddressFamily.InterNetwork);
-            udp.ExclusiveAddressUse = false;
-            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            udp.Client.Bind(new IPEndPoint(IPAddress.Any, endpoint.Port));
-            return udp;
-        }
-
-        private bool ApplyPresence(PresenceMessage message)
-        {
-            var now = DateTime.UtcNow;
-            var changed = false;
-            lock (rosterGate)
-            {
-                switch (message.Kind)
+                else
                 {
-                    case PresenceOpcode.Hello:
-                    case PresenceOpcode.Heartbeat:
-                        PresenceRecord existing;
-                        if (!roster.TryGetValue(message.ClientId, out existing))
-                        {
-                            changed = true;
-                        }
-                        else if (!string.Equals(existing.DisplayName, message.DisplayName, StringComparison.OrdinalIgnoreCase) || existing.CameraEnabled != message.CameraEnabled || existing.IsSpeaking != message.IsSpeaking)
-                        {
-                            changed = true;
-                        }
-
-                        roster[message.ClientId] = new PresenceRecord(message.ClientId, message.DisplayName, message.CameraEnabled, message.IsSpeaking, now);
-                        break;
-                    case PresenceOpcode.Goodbye:
-                        changed = roster.Remove(message.ClientId);
-                        break;
+                    comboBoxCameras.SelectedIndex = 0; // Seleccionar primera cámara
                 }
-            }
-
-            if (changed)
-            {
-                BeginInvoke(new Action(UpdateRosterList));
-                Log(string.Format("[INFO] Presence updated by {0}", message.DisplayName));
-            }
-
-            return changed;
-        }
-
-        private async Task BroadcastSnapshotAsync()
-        {
-            if (snapshotSender == null)
-            {
-                return;
-            }
-
-            await snapshotLock.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                PresenceRecord[] snapshot;
-                lock (rosterGate)
-                {
-                    snapshot = roster.Values.ToArray();
-                }
-
-                var envelope = PresenceMessage.CreateSnapshot(snapshot);
-                var payload = envelope.ToPacket();
-                await snapshotSender.SendAsync(payload, payload.Length, controlEndpoint).ConfigureAwait(false);
-                lastSnapshotUtc = DateTime.UtcNow;
-                snapshotsBroadcast++;
-            }
-            catch (ObjectDisposedException)
-            {
             }
             catch (Exception ex)
             {
-                Log("[ERROR] Snapshot broadcast: " + ex.Message);
-            }
-            finally
-            {
-                snapshotLock.Release();
+                Log($"❌ Error detectando cámaras: {ex.Message}");
             }
         }
 
-        // [AGENT] ELIMINADOS: Métodos de relay innecesarios (StartRelayServices, StopRelayServices,
-        // CreateRelayReceiver, CreateRelaySender, StartRelayLoop, CloseRelayClient, WaitRelayTask)
-        // En multicast P2P, los clientes envían directamente al grupo - no necesitan relay server
-
-        private bool CleanupInactiveClients()
+        private void OnStartClick(object sender, EventArgs e)
         {
-            var removed = new List<Guid>();
-            var now = DateTime.UtcNow;
-            lock (rosterGate)
+            try
             {
-                foreach (var pair in roster)
+                // Obtener cámara seleccionada del ComboBox
+                Camera cam = comboBoxCameras.SelectedItem as Camera;
+                
+                if (cam == null)
                 {
-                    if (now - pair.Value.LastSeenUtc > TimeSpan.FromSeconds(12))
+                    MessageBox.Show("Por favor, selecciona una cámara antes de iniciar.\n\nSi no hay cámaras disponibles:\n- Verifica conexión\n- Drivers instalados\n- Presiona 'Refresh Cameras'", 
+                        "No hay cámara seleccionada", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Log("❌ No hay cámara seleccionada");
+                    return;
+                }
+                Log($"Usando cámara: {cam.ToString()}");
+
+                isStreaming = true;
+                cts = new CancellationTokenSource();
+
+                // Configurar multicast
+                Log("Configurando endpoints multicast...");
+                videoEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_VIDEO);
+                audioEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_AUDIO);
+                chatOutEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_CHAT_OUT);
+                chatInEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_CHAT_IN);
+
+                Log("Creando sockets UDP...");
+                videoSender = new UdpClient();
+                videoSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
+                videoSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 10);
+
+                audioSender = new UdpClient();
+                audioSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
+                audioSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 10);
+
+                chatSender = new UdpClient();
+                chatSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
+                chatSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 10);
+
+                // Chat receiver
+                Log("Configurando receptor de chat...");
+                chatReceiver = new UdpClient();
+                chatReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                chatReceiver.Client.Bind(new IPEndPoint(IPAddress.Any, PORT_CHAT_IN));
+                chatReceiver.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
+
+                // Iniciar cámara
+                Log($"Configurando cámara {cam.ToString()}...");
+                frameSource = new CameraFrameSource(cam);
+                frameSource.Camera.CaptureWidth = 320;
+                frameSource.Camera.CaptureHeight = 240;
+                frameSource.Camera.Fps = 15;
+                frameSource.NewFrame += OnCameraFrame;
+                
+                Log("Iniciando captura de cámara...");
+                frameSource.StartFrameCapture();
+                Log("✅ Cámara iniciada");
+
+                // Iniciar audio
+                Log("Iniciando captura de audio...");
+                audioCapture = new SimpleAudioCapture();
+                audioCapture.DataAvailable += OnAudioData;
+                audioCapture.StartRecording(8000, 16, 1); // 8kHz, 16-bit, mono
+                Log("✅ Audio capturando");
+
+                // Iniciar chat
+                Log("Iniciando receptor de chat...");
+                chatTask = Task.Run(() => ChatReceiveLoop(cts.Token));
+
+                btnStart.Enabled = false;
+                btnStop.Enabled = true;
+
+                Log("✅ Transmisión iniciada correctamente");
+            }
+            catch (Exception ex)
+            {
+                Log("❌ ERROR: " + ex.Message);
+                Log("Stack: " + ex.StackTrace);
+                MessageBox.Show($"Error al iniciar:\n{ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                StopStreaming();
+            }
+        }
+
+        private void OnStopClick(object sender, EventArgs e)
+        {
+            StopStreaming();
+        }
+
+        private void OnRefreshClick(object sender, EventArgs e)
+        {
+            Log("Refrescando lista de cámaras...");
+            LoadCameras();
+        }
+
+        private void OnMetricsTick(object sender, EventArgs e)
+        {
+            // Actualizar métricas si es necesario
+        }
+
+        private void StopStreaming()
+        {
+            isStreaming = false;
+
+            if (cts != null)
+            {
+                cts.Cancel();
+                cts.Dispose();
+                cts = null;
+            }
+
+            if (frameSource != null)
+            {
+                frameSource.NewFrame -= OnCameraFrame;
+                frameSource.StopFrameCapture();
+                frameSource = null;
+            }
+
+            if (audioCapture != null)
+            {
+                audioCapture.DataAvailable -= OnAudioData;
+                audioCapture.Stop();
+                audioCapture.Dispose();
+                audioCapture = null;
+            }
+
+            if (videoSender != null)
+            {
+                videoSender.Close();
+                videoSender = null;
+            }
+
+            if (audioSender != null)
+            {
+                audioSender.Close();
+                audioSender = null;
+            }
+
+            if (chatSender != null)
+            {
+                chatSender.Close();
+                chatSender = null;
+            }
+
+            if (chatReceiver != null)
+            {
+                chatReceiver.Close();
+                chatReceiver = null;
+            }
+
+            if (chatTask != null && !chatTask.IsCompleted)
+            {
+                try { chatTask.Wait(100); } catch { }
+            }
+
+            btnStart.Enabled = true;
+            btnStop.Enabled = false;
+            frameNumber = 0;
+
+            Log("Transmisión detenida");
+        }
+
+        private void OnAudioData(object sender, AudioDataEventArgs e)
+        {
+            if (!isStreaming || audioSender == null) return;
+
+            try
+            {
+                // Codificar a A-Law (tomar solo los bytes necesarios)
+                byte[] audioData = new byte[e.BytesRecorded];
+                Array.Copy(e.Buffer, audioData, e.BytesRecorded);
+                byte[] encoded = ALawEncoder.ALawEncode(audioData);
+                
+                // Enviar por multicast
+                audioSender.Send(encoded, encoded.Length, audioEndpoint);
+            }
+            catch (Exception ex)
+            {
+                Log($"ERROR audio: {ex.Message}");
+            }
+        }
+
+        private void OnCameraFrame(Touchless.Vision.Contracts.IFrameSource source, Touchless.Vision.Contracts.Frame frame, double fps)
+        {
+            if (!isStreaming || videoSender == null) return;
+
+            try
+            {
+                Bitmap bitmap = (Bitmap)frame.Image.Clone();
+                
+                // Enviar por multicast
+                Task.Run(() => SendFrame(bitmap));
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR frame: " + ex.Message);
+            }
+        }
+
+        private void SendFrame(Bitmap bitmap)
+        {
+            try
+            {
+                byte[] imageData;
+                using (var ms = new MemoryStream())
+                {
+                    bitmap.Save(ms, ImageFormat.Jpeg);
+                    imageData = ms.ToArray();
+                }
+                bitmap.Dispose();
+
+                // Split en chunks
+                int totalChunks = (int)Math.Ceiling((double)imageData.Length / CHUNK_SIZE);
+                byte[] timestamp = BitConverter.GetBytes(DateTime.Now.ToBinary());
+                byte[] frameBytes = BitConverter.GetBytes(frameNumber);
+                byte[] totalChunksBytes = BitConverter.GetBytes(totalChunks);
+                byte[] totalSizeBytes = BitConverter.GetBytes(imageData.Length);
+                byte[] chunkSizeBytes = BitConverter.GetBytes(CHUNK_SIZE);
+
+                for (int i = 0; i < totalChunks; i++)
+                {
+                    int offset = i * CHUNK_SIZE;
+                    int length = Math.Min(CHUNK_SIZE, imageData.Length - offset);
+                    
+                    byte[] chunk = new byte[length];
+                    Array.Copy(imageData, offset, chunk, 0, length);
+
+                    byte[] chunkIndexBytes = BitConverter.GetBytes(i);
+
+                    // Header: timestamp(8) + frame(4) + chunkIndex(4) + totalChunks(4) + totalSize(4) + chunkSize(4) = 28 bytes
+                    byte[] packet = new byte[28 + length];
+                    Buffer.BlockCopy(timestamp, 0, packet, 0, 8);
+                    Buffer.BlockCopy(frameBytes, 0, packet, 8, 4);
+                    Buffer.BlockCopy(chunkIndexBytes, 0, packet, 12, 4);
+                    Buffer.BlockCopy(totalChunksBytes, 0, packet, 16, 4);
+                    Buffer.BlockCopy(totalSizeBytes, 0, packet, 20, 4);
+                    Buffer.BlockCopy(chunkSizeBytes, 0, packet, 24, 4);
+                    Buffer.BlockCopy(chunk, 0, packet, 28, length);
+
+                    videoSender.Send(packet, packet.Length, videoEndpoint);
+                }
+
+                frameNumber++;
+            }
+            catch (Exception ex)
+            {
+                Log("ERROR envío: " + ex.Message);
+            }
+        }
+
+        private void ChatReceiveLoop(CancellationToken token)
+        {
+            var remoteEP = new IPEndPoint(IPAddress.Any, PORT_CHAT_IN);
+            
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    chatReceiver.Client.ReceiveTimeout = 1000;
+                    byte[] data = chatReceiver.Receive(ref remoteEP);
+                    string mensaje = System.Text.Encoding.UTF8.GetString(data);
+                    
+                    BeginInvoke(new Action(() => MostrarMensaje(mensaje)));
+                }
+                catch (SocketException) { }
+                catch (Exception ex)
+                {
+                    if (!token.IsCancellationRequested)
                     {
-                        removed.Add(pair.Key);
+                        Log("ERROR chat: " + ex.Message);
                     }
                 }
-
-                foreach (var clientId in removed)
-                {
-                    roster.Remove(clientId);
-                }
             }
-
-            if (removed.Count > 0)
-            {
-                BeginInvoke(new Action(UpdateRosterList));
-                Log(string.Format("[WARN] Removed {0} inactive clients.", removed.Count));
-            }
-
-            return removed.Count > 0;
         }
 
-        private void UpdateRosterList()
+        private void MostrarMensaje(string mensaje)
         {
-            if (InvokeRequired)
+            string[] partes = mensaje.Split(';');
+            if (partes.Length == 2)
             {
-                BeginInvoke(new Action(UpdateRosterList));
+                Log($"Chat - {partes[0]}: {partes[1]}");
+            }
+        }
+
+        private void OnSendChatClick(object sender, EventArgs e)
+        {
+            // Chat simplificado - no hay UI de chat implementada
+        }
+
+        private void Log(string mensaje)
+        {
+            if (listEvents.InvokeRequired)
+            {
+                listEvents.BeginInvoke(new Action(() => Log(mensaje)));
                 return;
             }
 
-            if (listClients == null)
-            {
-                return;
-            }
-
-            listClients.BeginUpdate();
-            listClients.Items.Clear();
-            IEnumerable<PresenceRecord> ordered;
-            lock (rosterGate)
-            {
-                ordered = roster.Values.OrderBy(r => r.DisplayName).ToArray();
-            }
-
-            foreach (var record in ordered)
-            {
-                var status = record.CameraEnabled
-                    ? (record.IsSpeaking ? "Speaking" : "Camera ON")
-                    : "Camera OFF";
-                listClients.Items.Add(string.Format("{0} — {1}", record.DisplayName, status));
-            }
-
-            listClients.EndUpdate();
-        }
-
-        private async void OnMetricsTick(object sender, EventArgs e)
-        {
-            var removed = CleanupInactiveClients();
-            if (removed || ShouldPushHeartbeat())
-            {
-                await BroadcastSnapshotAsync().ConfigureAwait(false);
-            }
-
-            UpdateMetrics();
-        }
-
-        private bool ShouldPushHeartbeat()
-        {
-            if (snapshotSender == null)
-            {
-                return false;
-            }
-
-            var now = DateTime.UtcNow;
-            return lastSnapshotUtc == DateTime.MinValue || now - lastSnapshotUtc >= TimeSpan.FromSeconds(3);
-        }
-
-        private void UpdateMetrics()
-        {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(UpdateMetrics));
-                return;
-            }
-
-            var now = DateTime.UtcNow;
-            var lastSnapshotText = lastSnapshotUtc == DateTime.MinValue ? "-" : string.Format("{0:F1}s ago", (now - lastSnapshotUtc).TotalSeconds);
-            var onlineCount = 0;
-            lock (rosterGate)
-            {
-                onlineCount = roster.Count;
-            }
-
-            if (lblFrames != null)
-            {
-                lblFrames.Text = string.Format("Online: {0}", onlineCount);
-            }
-
-            if (lblBitrate != null)
-            {
-                lblBitrate.Text = string.Format("Snapshots: {0}", snapshotsBroadcast);
-            }
-
-            if (lblErrors != null)
-            {
-                lblErrors.Text = string.Format("Last push: {0}", lastSnapshotText);
-            }
-        }
-
-        private void Log(string message)
-        {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => Log(message)));
-                return;
-            }
-
-            listEvents.Items.Insert(0, string.Format("{0:HH:mm:ss} {1}", DateTime.Now, message));
-            while (listEvents.Items.Count > 100)
+            listEvents.Items.Insert(0, $"{DateTime.Now:HH:mm:ss} {mensaje}");
+            while (listEvents.Items.Count > 50)
             {
                 listEvents.Items.RemoveAt(listEvents.Items.Count - 1);
             }
         }
 
+        private void ApplyDiscordPalette()
+        {
+            BackColor = Color.FromArgb(54, 57, 63);
+            btnStart.BackColor = Color.FromArgb(67, 181, 129);
+            btnStart.ForeColor = Color.White;
+            btnStop.BackColor = Color.FromArgb(240, 71, 71);
+            btnStop.ForeColor = Color.White;
+            btnStop.Enabled = false;
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            StopPresenceService();
+            StopStreaming();
             base.OnFormClosing(e);
         }
     }

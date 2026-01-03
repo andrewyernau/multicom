@@ -37,7 +37,6 @@ namespace MultiCom.Client
             this.lblFps = new System.Windows.Forms.Label();
             this.btnDisconnect = new System.Windows.Forms.Button();
             this.btnConnect = new System.Windows.Forms.Button();
-            this.btnToggleCamera = new System.Windows.Forms.Button();
             this.btnSettings = new System.Windows.Forms.Button();
             this.lblProfileName = new System.Windows.Forms.Label();
             this.panelMain = new System.Windows.Forms.Panel();
@@ -65,7 +64,6 @@ namespace MultiCom.Client
             this.panelSidebar.Controls.Add(this.panelStats);
             this.panelSidebar.Controls.Add(this.btnDisconnect);
             this.panelSidebar.Controls.Add(this.btnConnect);
-            this.panelSidebar.Controls.Add(this.btnToggleCamera);
             this.panelSidebar.Controls.Add(this.btnSettings);
             this.panelSidebar.Controls.Add(this.lblProfileName);
             this.panelSidebar.Dock = System.Windows.Forms.DockStyle.Left;
@@ -181,18 +179,6 @@ namespace MultiCom.Client
             this.btnConnect.Click += new System.EventHandler(this.OnConnect);
             // 
             // btnToggleCamera
-            // 
-            this.btnToggleCamera.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(67)))), ((int)(((byte)(181)))), ((int)(((byte)(129)))));
-            this.btnToggleCamera.FlatAppearance.BorderSize = 0;
-            this.btnToggleCamera.FlatStyle = System.Windows.Forms.FlatStyle.Flat;
-            this.btnToggleCamera.ForeColor = System.Drawing.Color.White;
-            this.btnToggleCamera.Location = new System.Drawing.Point(16, 100);
-            this.btnToggleCamera.Name = "btnToggleCamera";
-            this.btnToggleCamera.Size = new System.Drawing.Size(248, 36);
-            this.btnToggleCamera.TabIndex = 2;
-            this.btnToggleCamera.Text = "Enable camera";
-            this.btnToggleCamera.UseVisualStyleBackColor = false;
-            this.btnToggleCamera.Click += new System.EventHandler(this.OnToggleCamera);
             // 
             // btnSettings
             // 
@@ -372,7 +358,6 @@ namespace MultiCom.Client
         private System.Windows.Forms.Label lblFps;
         private System.Windows.Forms.Button btnDisconnect;
         private System.Windows.Forms.Button btnConnect;
-        private System.Windows.Forms.Button btnToggleCamera;
         private System.Windows.Forms.Button btnSettings;
         private System.Windows.Forms.Label lblProfileName;
         private System.Windows.Forms.Panel panelMain;
