@@ -1,43 +1,32 @@
 using System;
 using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Touchless.Vision.Camera;
+using NAudio.Wave;
 using MultiCom.Shared.Audio;
-using MultiCom.Server.Audio;
 
 namespace MultiCom.Server
 {
     public partial class ServerForm : Form
     {
-        private const string MULTICAST_IP = "224.0.0.1";
-        private const int PORT_VIDEO = 8080;
-        private const int PORT_AUDIO = 8081;
-        private const int PORT_CHAT_OUT = 8082;
-        private const int PORT_CHAT_IN = 8083;
-        private const int CHUNK_SIZE = 2500;
-
-        private CameraFrameSource frameSource;
-        private UdpClient videoSender;
-        private UdpClient audioSender;
-        private UdpClient chatSender;
-        private UdpClient chatReceiver;
-        private IPEndPoint videoEndpoint;
-        private IPEndPoint audioEndpoint;
-        private IPEndPoint chatOutEndpoint;
-        private IPEndPoint chatInEndpoint;
-        private int frameNumber = 0;
-        private bool isStreaming = false;
-        private Task chatTask;
-        private CancellationTokenSource cts;
+        private CameraFrameSource _frameSource;
+        private static Bitmap _latestFrame;
         
-        private SimpleAudioCapture audioCapture;
+        // Audio
+        private WaveInEvent waveIn;
+        private UdpClient audioSender;
+        private IPEndPoint audioEndPoint;
+        
+        // Chat multicast
+        private UdpClient chatReceiver;
+        private Task chatTask;
+        private bool receivingChat = false;
+        private const int CHAT_PORT = 8082;
+        private const string CHAT_IP = "224.0.0.1";
 
         public ServerForm()
         {
@@ -48,7 +37,7 @@ namespace MultiCom.Server
         {
             ApplyDiscordPalette();
             LoadCameras();
-            Log("Servidor listo. Presiona Start para transmitir.");
+            StartChatReception();
         }
 
         private void LoadCameras()
@@ -57,27 +46,81 @@ namespace MultiCom.Server
             {
                 comboBoxCameras.Items.Clear();
                 
-                int count = CameraService.AvailableCameras.Count();
-                Log($"Cámaras detectadas: {count}");
-                
                 foreach (Camera cam in CameraService.AvailableCameras)
                 {
                     comboBoxCameras.Items.Add(cam);
-                    Log($"  - {cam.ToString()}");
                 }
                 
-                if (count == 0)
-                {
-                    Log("⚠️ No se detectaron cámaras. Verifica que la cámara esté conectada.");
-                }
-                else
-                {
-                    comboBoxCameras.SelectedIndex = 0; // Seleccionar primera cámara
-                }
+                if (comboBoxCameras.Items.Count > 0)
+                    comboBoxCameras.SelectedIndex = 0;
             }
             catch (Exception ex)
             {
-                Log($"❌ Error detectando cámaras: {ex.Message}");
+                Log($"Error al cargar cámaras: {ex.Message}");
+            }
+        }
+
+        private void setFrameSource(CameraFrameSource cameraFrameSource)
+        {
+            if (_frameSource == cameraFrameSource)
+                return;
+
+            _frameSource = cameraFrameSource;
+        }
+
+        public void OnImageCaptured(Touchless.Vision.Contracts.IFrameSource frameSource, Touchless.Vision.Contracts.Frame frame, double fps)
+        {
+            _latestFrame = frame.Image;
+            pictureBox.Invalidate();
+        }
+
+        private void drawLatestImage(object sender, PaintEventArgs e)
+        {
+            if (_latestFrame != null)
+            {
+                Bitmap resized = new Bitmap(_latestFrame, new Size(640, 480));
+                e.Graphics.DrawImage(resized, 0, 0, resized.Width, resized.Height);
+
+                try
+                {
+                    UdpClient udpServer = new UdpClient();
+                    IPAddress multicastaddress = IPAddress.Parse("224.0.0.1");
+                    
+                    // Configurar TTL
+                    udpServer.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 32);
+                    
+                    udpServer.JoinMulticastGroup(multicastaddress);
+                    IPEndPoint remote = new IPEndPoint(multicastaddress, 8080);
+
+                    uint imageNumber = (uint)Environment.TickCount;
+                    long timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+                    byte[] jpegData = ImageToByteArray(resized);
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        ms.Write(BitConverter.GetBytes(imageNumber), 0, 4);
+                        ms.Write(BitConverter.GetBytes(timestamp), 0, 8);
+                        ms.Write(jpegData, 0, jpegData.Length);
+
+                        byte[] paquete = ms.ToArray();
+                        udpServer.Send(paquete, paquete.Length, remote);
+                    }
+
+                    udpServer.Close();
+                }
+                catch (Exception ex)
+                {
+                    Log($"Error al enviar video: {ex.Message}");
+                }
+            }
+        }
+
+        public byte[] ImageToByteArray(Image imageIn)
+        {
+            using (var ms = new MemoryStream())
+            {
+                imageIn.Save(ms, System.Drawing.Imaging.ImageFormat.Jpeg);
+                return ms.ToArray();
             }
         }
 
@@ -85,288 +128,172 @@ namespace MultiCom.Server
         {
             try
             {
-                // Obtener cámara seleccionada del ComboBox
-                Camera cam = comboBoxCameras.SelectedItem as Camera;
+                Camera c = (Camera)comboBoxCameras.SelectedItem;
                 
-                if (cam == null)
+                if (c == null)
                 {
-                    MessageBox.Show("Por favor, selecciona una cámara antes de iniciar.\n\nSi no hay cámaras disponibles:\n- Verifica conexión\n- Drivers instalados\n- Presiona 'Refresh Cameras'", 
-                        "No hay cámara seleccionada", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    Log("❌ No hay cámara seleccionada");
+                    MessageBox.Show("Selecciona una cámara", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
-                Log($"Usando cámara: {cam.ToString()}");
-
-                isStreaming = true;
-                cts = new CancellationTokenSource();
-
-                // Configurar multicast
-                Log("Configurando endpoints multicast...");
-                videoEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_VIDEO);
-                audioEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_AUDIO);
-                chatOutEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_CHAT_OUT);
-                chatInEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), PORT_CHAT_IN);
-
-                Log("Creando sockets UDP...");
-                videoSender = new UdpClient();
-                videoSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-                videoSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 10);
-
-                audioSender = new UdpClient();
-                audioSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-                audioSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 10);
-
-                chatSender = new UdpClient();
-                chatSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-                chatSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 10);
-
-                // Chat receiver
-                Log("Configurando receptor de chat...");
-                chatReceiver = new UdpClient();
-                chatReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                chatReceiver.Client.Bind(new IPEndPoint(IPAddress.Any, PORT_CHAT_IN));
-                chatReceiver.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-
-                // Iniciar cámara
-                Log($"Configurando cámara {cam.ToString()}...");
-                frameSource = new CameraFrameSource(cam);
-                frameSource.Camera.CaptureWidth = 320;
-                frameSource.Camera.CaptureHeight = 240;
-                frameSource.Camera.Fps = 15;
-                frameSource.NewFrame += OnCameraFrame;
                 
-                Log("Iniciando captura de cámara...");
-                frameSource.StartFrameCapture();
-                Log("✅ Cámara iniciada");
+                setFrameSource(new CameraFrameSource(c));
+                _frameSource.Camera.CaptureWidth = 320;
+                _frameSource.Camera.CaptureHeight = 240;
+                _frameSource.Camera.Fps = 20;
+                _frameSource.NewFrame += OnImageCaptured;
+                pictureBox.Paint += new PaintEventHandler(drawLatestImage);
+                _frameSource.StartFrameCapture();
 
                 // Iniciar audio
-                Log("Iniciando captura de audio...");
-                audioCapture = new SimpleAudioCapture();
-                audioCapture.DataAvailable += OnAudioData;
-                audioCapture.StartRecording(8000, 16, 1); // 8kHz, 16-bit, mono
-                Log("✅ Audio capturando");
-
-                // Iniciar chat
-                Log("Iniciando receptor de chat...");
-                chatTask = Task.Run(() => ChatReceiveLoop(cts.Token));
+                StartAudioTransmission();
 
                 btnStart.Enabled = false;
                 btnStop.Enabled = true;
-
-                Log("✅ Transmisión iniciada correctamente");
+                
+                Log("Transmisión de video y audio iniciada");
             }
-            catch (Exception ex)
+            catch (Exception x)
             {
-                Log("❌ ERROR: " + ex.Message);
-                Log("Stack: " + ex.StackTrace);
-                MessageBox.Show($"Error al iniciar:\n{ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                StopStreaming();
+                Log($"Error al iniciar: {x.Message}");
+                MessageBox.Show($"Error: {x.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         private void OnStopClick(object sender, EventArgs e)
         {
-            StopStreaming();
+            try
+            {
+                if (_frameSource != null)
+                {
+                    _frameSource.NewFrame -= OnImageCaptured;
+                    pictureBox.Paint -= drawLatestImage;
+                    _frameSource.StopFrameCapture();
+                    _frameSource = null;
+                }
+                
+                waveIn?.StopRecording();
+                audioSender?.Close();
+                
+                receivingChat = false;
+                if (chatTask != null)
+                {
+                    try { chatTask.Wait(1000); } catch { }
+                }
+                chatReceiver?.Close();
+                
+                _latestFrame = null;
+                
+                btnStart.Enabled = true;
+                btnStop.Enabled = false;
+                
+                Log("Transmisión detenida");
+            }
+            catch (Exception ex)
+            {
+                Log($"Error al detener: {ex.Message}");
+            }
+        }
+
+        private void StartAudioTransmission()
+        {
+            try
+            {
+                audioSender = new UdpClient();
+                
+                // Configurar TTL
+                audioSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 32);
+                
+                // Unirse al grupo multicast para audio
+                IPAddress multicastAddress = IPAddress.Parse("224.0.0.1");
+                audioSender.JoinMulticastGroup(multicastAddress);
+                audioEndPoint = new IPEndPoint(multicastAddress, 8081);
+
+                waveIn = new WaveInEvent();
+                waveIn.WaveFormat = new WaveFormat(8000, 16, 1);
+                waveIn.BufferMilliseconds = 50;
+                waveIn.DataAvailable += OnAudioCaptured;
+                waveIn.StartRecording();
+                Log("Audio iniciado correctamente");
+            }
+            catch (Exception ex)
+            {
+                Log($"Error iniciando audio: {ex.Message}");
+            }
+        }
+
+        private void OnAudioCaptured(object sender, WaveInEventArgs e)
+        {
+            try
+            {
+                short[] pcm = new short[e.BytesRecorded / 2];
+                Buffer.BlockCopy(e.Buffer, 0, pcm, 0, e.BytesRecorded);
+
+                byte[] encoded = ALawEncoder.ALawEncode(pcm);
+                audioSender.Send(encoded, encoded.Length, audioEndPoint);
+            }
+            catch
+            {
+            }
         }
 
         private void OnRefreshClick(object sender, EventArgs e)
         {
-            Log("Refrescando lista de cámaras...");
             LoadCameras();
+        }
+        
+        private void StartChatReception()
+        {
+            if (receivingChat) return;
+
+            receivingChat = true;
+            chatTask = Task.Run(() => ReceiveChat());
+            Log("Chat iniciado - recibiendo mensajes");
+        }
+
+        private void ReceiveChat()
+        {
+            try
+            {
+                // Configurar socket
+                chatReceiver = new UdpClient();
+                chatReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                
+                // Bind al puerto
+                IPEndPoint chatEP = new IPEndPoint(IPAddress.Any, CHAT_PORT);
+                chatReceiver.Client.Bind(chatEP);
+                
+                // Unirse al grupo multicas
+                chatReceiver.JoinMulticastGroup(IPAddress.Parse(CHAT_IP));
+
+                while (receivingChat)
+                {
+                    try
+                    {
+                        byte[] buffer = chatReceiver.Receive(ref chatEP);
+                        string mensaje = System.Text.Encoding.Unicode.GetString(buffer);
+
+                        // Mostrar en el log
+                        Log($"Chat: {mensaje}");
+                    }
+                    catch (SocketException)
+                    {
+                        // Timeout o error de socket
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error en chat: {ex.Message}");
+            }
+            finally
+            {
+                chatReceiver?.Close();
+            }
         }
 
         private void OnMetricsTick(object sender, EventArgs e)
         {
-            // Actualizar métricas si es necesario
-        }
-
-        private void StopStreaming()
-        {
-            isStreaming = false;
-
-            if (cts != null)
-            {
-                cts.Cancel();
-                cts.Dispose();
-                cts = null;
-            }
-
-            if (frameSource != null)
-            {
-                frameSource.NewFrame -= OnCameraFrame;
-                frameSource.StopFrameCapture();
-                frameSource = null;
-            }
-
-            if (audioCapture != null)
-            {
-                audioCapture.DataAvailable -= OnAudioData;
-                audioCapture.Stop();
-                audioCapture.Dispose();
-                audioCapture = null;
-            }
-
-            if (videoSender != null)
-            {
-                videoSender.Close();
-                videoSender = null;
-            }
-
-            if (audioSender != null)
-            {
-                audioSender.Close();
-                audioSender = null;
-            }
-
-            if (chatSender != null)
-            {
-                chatSender.Close();
-                chatSender = null;
-            }
-
-            if (chatReceiver != null)
-            {
-                chatReceiver.Close();
-                chatReceiver = null;
-            }
-
-            if (chatTask != null && !chatTask.IsCompleted)
-            {
-                try { chatTask.Wait(100); } catch { }
-            }
-
-            btnStart.Enabled = true;
-            btnStop.Enabled = false;
-            frameNumber = 0;
-
-            Log("Transmisión detenida");
-        }
-
-        private void OnAudioData(object sender, AudioDataEventArgs e)
-        {
-            if (!isStreaming || audioSender == null) return;
-
-            try
-            {
-                // Codificar a A-Law (tomar solo los bytes necesarios)
-                byte[] audioData = new byte[e.BytesRecorded];
-                Array.Copy(e.Buffer, audioData, e.BytesRecorded);
-                byte[] encoded = ALawEncoder.ALawEncode(audioData);
-                
-                // Enviar por multicast
-                audioSender.Send(encoded, encoded.Length, audioEndpoint);
-            }
-            catch (Exception ex)
-            {
-                Log($"ERROR audio: {ex.Message}");
-            }
-        }
-
-        private void OnCameraFrame(Touchless.Vision.Contracts.IFrameSource source, Touchless.Vision.Contracts.Frame frame, double fps)
-        {
-            if (!isStreaming || videoSender == null) return;
-
-            try
-            {
-                Bitmap bitmap = (Bitmap)frame.Image.Clone();
-                
-                // Enviar por multicast
-                Task.Run(() => SendFrame(bitmap));
-            }
-            catch (Exception ex)
-            {
-                Log("ERROR frame: " + ex.Message);
-            }
-        }
-
-        private void SendFrame(Bitmap bitmap)
-        {
-            try
-            {
-                byte[] imageData;
-                using (var ms = new MemoryStream())
-                {
-                    bitmap.Save(ms, ImageFormat.Jpeg);
-                    imageData = ms.ToArray();
-                }
-                bitmap.Dispose();
-
-                // Split en chunks
-                int totalChunks = (int)Math.Ceiling((double)imageData.Length / CHUNK_SIZE);
-                byte[] timestamp = BitConverter.GetBytes(DateTime.Now.ToBinary());
-                byte[] frameBytes = BitConverter.GetBytes(frameNumber);
-                byte[] totalChunksBytes = BitConverter.GetBytes(totalChunks);
-                byte[] totalSizeBytes = BitConverter.GetBytes(imageData.Length);
-                byte[] chunkSizeBytes = BitConverter.GetBytes(CHUNK_SIZE);
-
-                for (int i = 0; i < totalChunks; i++)
-                {
-                    int offset = i * CHUNK_SIZE;
-                    int length = Math.Min(CHUNK_SIZE, imageData.Length - offset);
-                    
-                    byte[] chunk = new byte[length];
-                    Array.Copy(imageData, offset, chunk, 0, length);
-
-                    byte[] chunkIndexBytes = BitConverter.GetBytes(i);
-
-                    // Header: timestamp(8) + frame(4) + chunkIndex(4) + totalChunks(4) + totalSize(4) + chunkSize(4) = 28 bytes
-                    byte[] packet = new byte[28 + length];
-                    Buffer.BlockCopy(timestamp, 0, packet, 0, 8);
-                    Buffer.BlockCopy(frameBytes, 0, packet, 8, 4);
-                    Buffer.BlockCopy(chunkIndexBytes, 0, packet, 12, 4);
-                    Buffer.BlockCopy(totalChunksBytes, 0, packet, 16, 4);
-                    Buffer.BlockCopy(totalSizeBytes, 0, packet, 20, 4);
-                    Buffer.BlockCopy(chunkSizeBytes, 0, packet, 24, 4);
-                    Buffer.BlockCopy(chunk, 0, packet, 28, length);
-
-                    videoSender.Send(packet, packet.Length, videoEndpoint);
-                }
-
-                frameNumber++;
-            }
-            catch (Exception ex)
-            {
-                Log("ERROR envío: " + ex.Message);
-            }
-        }
-
-        private void ChatReceiveLoop(CancellationToken token)
-        {
-            var remoteEP = new IPEndPoint(IPAddress.Any, PORT_CHAT_IN);
-            
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    chatReceiver.Client.ReceiveTimeout = 1000;
-                    byte[] data = chatReceiver.Receive(ref remoteEP);
-                    string mensaje = System.Text.Encoding.UTF8.GetString(data);
-                    
-                    BeginInvoke(new Action(() => MostrarMensaje(mensaje)));
-                }
-                catch (SocketException) { }
-                catch (Exception ex)
-                {
-                    if (!token.IsCancellationRequested)
-                    {
-                        Log("ERROR chat: " + ex.Message);
-                    }
-                }
-            }
-        }
-
-        private void MostrarMensaje(string mensaje)
-        {
-            string[] partes = mensaje.Split(';');
-            if (partes.Length == 2)
-            {
-                Log($"Chat - {partes[0]}: {partes[1]}");
-            }
-        }
-
-        private void OnSendChatClick(object sender, EventArgs e)
-        {
-            // Chat simplificado - no hay UI de chat implementada
+            // No
         }
 
         private void Log(string mensaje)
@@ -396,7 +323,8 @@ namespace MultiCom.Server
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            StopStreaming();
+            receivingChat = false;
+            OnStopClick(null, null);
             base.OnFormClosing(e);
         }
     }

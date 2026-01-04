@@ -47,6 +47,7 @@ namespace MultiCom.Client
             this.btnSendMessage = new System.Windows.Forms.Button();
             this.txtMessage = new System.Windows.Forms.TextBox();
             this.flowVideo = new System.Windows.Forms.FlowLayoutPanel();
+            this.pictureBoxVideo = new System.Windows.Forms.PictureBox();
             this.labelTitle = new System.Windows.Forms.Label();
             this.uiTimer = new System.Windows.Forms.Timer(this.components);
             this.panelSidebar.SuspendLayout();
@@ -54,11 +55,16 @@ namespace MultiCom.Client
             this.panelMain.SuspendLayout();
             this.panelChat.SuspendLayout();
             this.panelInput.SuspendLayout();
+            this.flowVideo.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.pictureBoxVideo)).BeginInit();
+            this.flowVideo.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)(this.pictureBoxVideo)).BeginInit();
             this.SuspendLayout();
             // 
             // panelSidebar
             // 
             this.panelSidebar.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(32)))), ((int)(((byte)(34)))), ((int)(((byte)(37)))));
+            this.panelSidebar.Controls.Add(this.panelChat);
             this.panelSidebar.Controls.Add(this.listMembers);
             this.panelSidebar.Controls.Add(this.labelMembers);
             this.panelSidebar.Controls.Add(this.panelStats);
@@ -202,12 +208,11 @@ namespace MultiCom.Client
             this.lblProfileName.Name = "lblProfileName";
             this.lblProfileName.Size = new System.Drawing.Size(133, 20);
             this.lblProfileName.TabIndex = 0;
-            this.lblProfileName.Text = "Signed in as Agent";
+            this.lblProfileName.Text = "Signed in as User";
             // 
             // panelMain
             // 
             this.panelMain.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(54)))), ((int)(((byte)(57)))), ((int)(((byte)(63)))));
-            this.panelMain.Controls.Add(this.panelChat);
             this.panelMain.Controls.Add(this.flowVideo);
             this.panelMain.Controls.Add(this.labelTitle);
             this.panelMain.Dock = System.Windows.Forms.DockStyle.Fill;
@@ -221,14 +226,13 @@ namespace MultiCom.Client
             // 
             this.panelChat.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(47)))), ((int)(((byte)(49)))), ((int)(((byte)(54)))));
             this.panelChat.Controls.Add(this.listChat);
-            this.panelChat.Controls.Add(this.listDiagnostics);
             this.panelChat.Controls.Add(this.panelInput);
-            this.panelChat.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.panelChat.Location = new System.Drawing.Point(16, 256);
+            this.panelChat.Dock = System.Windows.Forms.DockStyle.Bottom;
+            this.panelChat.Location = new System.Drawing.Point(16, 420);
             this.panelChat.Name = "panelChat";
-            this.panelChat.Padding = new System.Windows.Forms.Padding(16);
-            this.panelChat.Size = new System.Drawing.Size(948, 448);
-            this.panelChat.TabIndex = 2;
+            this.panelChat.Padding = new System.Windows.Forms.Padding(8);
+            this.panelChat.Size = new System.Drawing.Size(248, 284);
+            this.panelChat.TabIndex = 10;
             // 
             // listChat
             // 
@@ -238,23 +242,10 @@ namespace MultiCom.Client
             this.listChat.ForeColor = System.Drawing.Color.White;
             this.listChat.FormattingEnabled = true;
             this.listChat.ItemHeight = 20;
-            this.listChat.Location = new System.Drawing.Point(16, 16);
+            this.listChat.Location = new System.Drawing.Point(8, 8);
             this.listChat.Name = "listChat";
-            this.listChat.Size = new System.Drawing.Size(916, 288);
+            this.listChat.Size = new System.Drawing.Size(232, 220);
             this.listChat.TabIndex = 1;
-            // 
-            // listDiagnostics
-            // 
-            this.listDiagnostics.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(41)))), ((int)(((byte)(43)))), ((int)(((byte)(47)))));
-            this.listDiagnostics.BorderStyle = System.Windows.Forms.BorderStyle.None;
-            this.listDiagnostics.Dock = System.Windows.Forms.DockStyle.Bottom;
-            this.listDiagnostics.ForeColor = System.Drawing.Color.White;
-            this.listDiagnostics.FormattingEnabled = true;
-            this.listDiagnostics.ItemHeight = 20;
-            this.listDiagnostics.Location = new System.Drawing.Point(16, 304);
-            this.listDiagnostics.Name = "listDiagnostics";
-            this.listDiagnostics.Size = new System.Drawing.Size(916, 80);
-            this.listDiagnostics.TabIndex = 3;
             // 
             // panelInput
             // 
@@ -299,12 +290,24 @@ namespace MultiCom.Client
             // 
             this.flowVideo.AutoScroll = true;
             this.flowVideo.BackColor = System.Drawing.Color.FromArgb(((int)(((byte)(47)))), ((int)(((byte)(49)))), ((int)(((byte)(54)))));
-            this.flowVideo.Dock = System.Windows.Forms.DockStyle.Top;
+            this.flowVideo.Controls.Add(this.pictureBoxVideo);
+            this.flowVideo.Dock = System.Windows.Forms.DockStyle.Fill;
             this.flowVideo.Location = new System.Drawing.Point(16, 16);
             this.flowVideo.Name = "flowVideo";
             this.flowVideo.Padding = new System.Windows.Forms.Padding(8);
-            this.flowVideo.Size = new System.Drawing.Size(948, 240);
+            this.flowVideo.Size = new System.Drawing.Size(948, 688);
             this.flowVideo.TabIndex = 1;
+            // 
+            // pictureBoxVideo
+            // 
+            this.pictureBoxVideo.BackColor = System.Drawing.Color.Black;
+            this.pictureBoxVideo.Location = new System.Drawing.Point(10, 10);
+            this.pictureBoxVideo.Margin = new System.Windows.Forms.Padding(8);
+            this.pictureBoxVideo.Name = "pictureBoxVideo";
+            this.pictureBoxVideo.Size = new System.Drawing.Size(640, 480);
+            this.pictureBoxVideo.SizeMode = System.Windows.Forms.PictureBoxSizeMode.Zoom;
+            this.pictureBoxVideo.TabIndex = 0;
+            this.pictureBoxVideo.TabStop = false;
             // 
             // labelTitle
             // 
@@ -344,6 +347,8 @@ namespace MultiCom.Client
             this.panelChat.ResumeLayout(false);
             this.panelInput.ResumeLayout(false);
             this.panelInput.PerformLayout();
+            this.flowVideo.ResumeLayout(false);
+            ((System.ComponentModel.ISupportInitialize)(this.pictureBoxVideo)).EndInit();
             this.ResumeLayout(false);
 
         }
@@ -370,5 +375,6 @@ namespace MultiCom.Client
         private System.Windows.Forms.ListBox listChat;
         private System.Windows.Forms.ListBox listDiagnostics;
         private System.Windows.Forms.Timer uiTimer;
+        private System.Windows.Forms.PictureBox pictureBoxVideo;
     }
 }

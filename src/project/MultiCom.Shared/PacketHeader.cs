@@ -24,7 +24,7 @@ namespace MultiCom.Shared
         {
             byte[] header = new byte[HEADER_SIZE];
             
-            // ClientID (16 bytes) - padding con espacios si es menor
+            // ClientID (16 bytes)
             byte[] clientIdBytes = Encoding.UTF8.GetBytes(ClientID.PadRight(CLIENT_ID_SIZE).Substring(0, CLIENT_ID_SIZE));
             Buffer.BlockCopy(clientIdBytes, 0, header, 0, CLIENT_ID_SIZE);
             

@@ -3,571 +3,383 @@ using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using MultiCom.Shared.Audio;
-using MultiCom.Shared.Networking;
-using MultiCom.Client.Audio;
 using NAudio.Wave;
+using MultiCom.Shared.Audio;
 
 namespace MultiCom.Client
 {
     public partial class ClientForm : Form
     {
-        private const string MULTICAST_IP = "224.0.0.1";
-        private const int VIDEO_PORT = 8080;
-        private const int AUDIO_PORT = 8081;
-        private const int CHAT_SERVER_PORT = 8082; // Cliente recibe
-        private const int CHAT_CLIENT_PORT = 8083; // Cliente envía
-
-        private string userName = "User";
-        private bool isConnected;
-
-        private UdpClient videoReceiver;
+        private static Bitmap _latestFrame;
+        private bool receivingVideo = false;
         private Task videoTask;
-        private PictureBox pictureBoxVideo;  // Control para mostrar video
-
+        
+        // Chat multicast
+        private UdpClient chatSender;
+        private UdpClient chatReceiver;
+        private Task chatTask;
+        private bool receivingChat = false;
+        private const int CHAT_PORT = 8082;
+        private const string CHAT_IP = "224.0.0.1";
+        
+        // Audio multicast
         private UdpClient audioReceiver;
         private Task audioTask;
-        private SimpleAudioPlayer audioPlayer;
+        private bool receivingAudio = false;
+        private NAudio.Wave.WaveOutEvent waveOut;
+        private NAudio.Wave.BufferedWaveProvider waveProvider;
+        private const int AUDIO_PORT = 8081;
 
-        private UdpClient chatSender;
-        private IPEndPoint chatSenderEndpoint;
-        private UdpClient chatReceiver;
-        private IPEndPoint chatReceiverEndpoint;
-        private Task chatTask;
-
-        private readonly PerformanceTracker performanceTracker = new PerformanceTracker(100);
-        private int lastReceivedSeqNum = -1;
-        private int lastReceivedFrameNum = -1;
+        // Métricas
+        private long? ultimaLatencia = null;
+        private double jitterAcumulado = 0;
+        private int muestras = 0;
+        private int frameCount = 0;
 
         public ClientForm()
         {
             InitializeComponent();
-            this.Load += OnClientLoaded;
-            this.FormClosing += OnClientClosing;
         }
 
         private void OnClientLoaded(object sender, EventArgs e)
         {
-            btnDisconnect.Enabled = false;
-            
-            // Crear PictureBox para video
-            pictureBoxVideo = new PictureBox
+            ApplyDiscordPalette();
+            this.Text = "Cliente MultiCom";
+
+            // Iniciar recepcion
+            StartVideoReception();
+            StartChatReception();
+            StartAudioReception();
+        }
+
+        private void StartAudioReception()
+        {
+            if (receivingAudio) return;
+
+            receivingAudio = true;
+            audioTask = Task.Run(() => ReceiveAudio());
+            Log("Audio iniciado");
+        }
+
+        private void ReceiveAudio()
+        {
+            try
             {
-                Size = new Size(640, 480),
-                SizeMode = PictureBoxSizeMode.Zoom,
-                BackColor = Color.FromArgb(47, 49, 54),
-                Dock = DockStyle.Fill
-            };
-            
-            if (flowVideo != null)
+                // Configurar socket
+                audioReceiver = new UdpClient();
+                audioReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                
+                // Bind al puerto
+                IPEndPoint audioEP = new IPEndPoint(IPAddress.Any, AUDIO_PORT);
+                audioReceiver.Client.Bind(audioEP);
+                
+                // Unirse al grupo multicast
+                audioReceiver.JoinMulticastGroup(IPAddress.Parse(CHAT_IP));
+
+                waveProvider = new NAudio.Wave.BufferedWaveProvider(new NAudio.Wave.WaveFormat(8000, 16, 1))
+                {
+                    DiscardOnBufferOverflow = true
+                };
+                
+                waveOut = new NAudio.Wave.WaveOutEvent();
+                waveOut.Init(waveProvider);
+                waveOut.Play();
+
+                while (receivingAudio)
+                {
+                    try
+                    {
+                        byte[] alaw = audioReceiver.Receive(ref audioEP);
+                        short[] decoded = ALawDecoder.ALawDecode(alaw);
+
+                        byte[] pcm = new byte[decoded.Length * 2];
+                        Buffer.BlockCopy(decoded, 0, pcm, 0, pcm.Length);
+
+                        waveProvider.AddSamples(pcm, 0, pcm.Length);
+                    }
+                    catch (SocketException)
+                    {
+                        // Timeout o error de socket
+                    }
+                }
+            }
+            catch (Exception ex)
             {
-                flowVideo.Controls.Add(pictureBoxVideo);
+                Log($"Error en audio: {ex.Message}");
+            }
+            finally
+            {
+                waveOut?.Dispose();
+                audioReceiver?.Close();
+            }
+        }
+
+        private void StartChatReception()
+        {
+            if (receivingChat) return;
+
+            receivingChat = true;
+            chatTask = Task.Run(() => ReceiveChat());
+            Log("Chat iniciado");
+        }
+
+        private void ReceiveChat()
+        {
+            try
+            {
+                // Configurar socket
+                chatReceiver = new UdpClient();
+                chatReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                
+                // Bind al puerto
+                IPEndPoint chatEP = new IPEndPoint(IPAddress.Any, CHAT_PORT);
+                chatReceiver.Client.Bind(chatEP);
+                
+                // Unirse al grupo multicast
+                chatReceiver.JoinMulticastGroup(IPAddress.Parse(CHAT_IP));
+
+                while (receivingChat)
+                {
+                    try
+                    {
+                        byte[] buffer = chatReceiver.Receive(ref chatEP);
+                        string mensaje = System.Text.Encoding.Unicode.GetString(buffer);
+
+                        // Mostrar en el cjat los mensajes
+                        if (listChat.InvokeRequired)
+                        {
+                            listChat.BeginInvoke(new Action(() =>
+                            {
+                                listChat.Items.Add(mensaje);
+                                listChat.TopIndex = listChat.Items.Count - 1;
+                            }));
+                        }
+                        else
+                        {
+                            listChat.Items.Add(mensaje);
+                            listChat.TopIndex = listChat.Items.Count - 1;
+                        }
+                    }
+                    catch (SocketException)
+                    {
+                        // Timeout o error de socket
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error en chat: {ex.Message}");
+            }
+            finally
+            {
+                chatReceiver?.Close();
+            }
+        }
+
+        private void StartVideoReception()
+        {
+            if (receivingVideo) return;
+
+            receivingVideo = true;
+            videoTask = Task.Run(() => ReceiveVideo());
+            Log("Recepción de video iniciada");
+        }
+
+        private void ReceiveVideo()
+        {
+            // Configurar socket
+            UdpClient udpClient = new UdpClient();
+            udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            
+            // Bind al puerto
+            IPEndPoint remoteep = new IPEndPoint(IPAddress.Any, 8080);
+            udpClient.Client.Bind(remoteep);
+            
+            // Unirse al grupo multicast
+            IPAddress multicastaddress = IPAddress.Parse("224.0.0.1");
+            udpClient.JoinMulticastGroup(multicastaddress);
+
+            while (receivingVideo)
+            {
+                try
+                {
+                    byte[] paquete = udpClient.Receive(ref remoteep);
+                    if (paquete.Length <= 12) continue;
+
+                    // Leer cabecera
+                    uint imageNumber = BitConverter.ToUInt32(paquete, 0);
+                    long timestampEmisor = BitConverter.ToInt64(paquete, 4);
+                    long ahora = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    long latencia = ahora - timestampEmisor;
+
+                    // Calcular jitter
+                    if (ultimaLatencia.HasValue)
+                    {
+                        long variacion = Math.Abs(latencia - ultimaLatencia.Value);
+                        jitterAcumulado += variacion;
+                        muestras++;
+                    }
+                    ultimaLatencia = latencia;
+
+                    // Extraer JPEG
+                    byte[] jpeg = new byte[paquete.Length - 12];
+                    Array.Copy(paquete, 12, jpeg, 0, jpeg.Length);
+
+                    // Convertir a imagen
+                    _latestFrame = (Bitmap)ByteArrayToImage(jpeg);
+                    if (_latestFrame != null)
+                    {
+                        Bitmap resizedImage = new Bitmap(_latestFrame, new Size(640, 480));
+                        
+                        // Mostrar en pictureBoxVideo
+                        if (pictureBoxVideo != null)
+                        {
+                            pictureBoxVideo.Invoke((MethodInvoker)(() => pictureBoxVideo.Image = resizedImage));
+                        }
+                        
+                        frameCount++;
+
+                        // Actualizar métricas
+                        this.Invoke((MethodInvoker)(() =>
+                        {
+                            lblLatency.Text = $"Latencia: {latencia} ms";
+                            lblJitter.Text = $"Jitter: {(muestras > 0 ? (jitterAcumulado / muestras).ToString("F2") : "0")} ms";
+                            lblFps.Text = $"Frames: {frameCount}";
+                        }));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (receivingVideo)
+                    {
+                        Log($"Error recibiendo video: {ex.Message}");
+                    }
+                }
             }
 
-            // Iniciar timer de métricas
-            if (uiTimer != null)
+            udpClient.Close();
+        }
+
+        public Image ByteArrayToImage(byte[] byteArrayIn)
+        {
+            using (var ms = new MemoryStream(byteArrayIn))
             {
-                uiTimer.Start();
+                return Image.FromStream(ms);
             }
-            
-            Log("[INFO] Ready. Press Connect to join.");
+        }
+
+        private void Log(string mensaje)
+        {
+            System.Diagnostics.Debug.WriteLine($"{DateTime.Now:HH:mm:ss} {mensaje}");
+        }
+
+        private void ApplyDiscordPalette()
+        {
+            BackColor = Color.FromArgb(54, 57, 63);
         }
 
         private void OnConnect(object sender, EventArgs e)
         {
-            if (isConnected) return;
-
-            try
-            {
-                isConnected = true;
-                btnConnect.Enabled = false;
-                btnDisconnect.Enabled = true;
-
-                // Reset métricas
-                performanceTracker.Reset();
-                lastReceivedSeqNum = -1;
-                lastReceivedFrameNum = -1;
-
-                // Iniciar recepción de video
-                StartVideoReceiver();
-
-                // Iniciar recepción de audio
-                StartAudioReceiver();
-
-                // Iniciar chat
-                StartChat();
-
-                // Enviar mensaje de unión
-                if (chatSender != null)
-                {
-                    byte[] msg = Encoding.UTF8.GetBytes($";{userName} joined");
-                    chatSender.Send(msg, msg.Length, chatSenderEndpoint);
-                }
-
-                Log("[INFO] Connected to conference.");
-            }
-            catch (Exception ex)
-            {
-                Log("[ERROR] Connect failed: " + ex.Message);
-                OnDisconnect(null, null);
-            }
         }
 
         private void OnDisconnect(object sender, EventArgs e)
         {
-            if (!isConnected) return;
-
-            try
+            receivingVideo = false;
+            receivingChat = false;
+            receivingAudio = false;
+            
+            if (videoTask != null)
             {
-                isConnected = false;
-
-                // Detener tareas
-                videoTask = null;
-                audioTask = null;
-                chatTask = null;
-
-                // Cerrar sockets
-                videoReceiver?.Close();
-                audioReceiver?.Close();
-                chatSender?.Close();
-                chatReceiver?.Close();
-                audioPlayer?.Dispose();
-
-                videoReceiver = null;
-                audioReceiver = null;
-                chatSender = null;
-                chatReceiver = null;
-                audioPlayer = null;
-
-                btnConnect.Enabled = true;
-                btnDisconnect.Enabled = false;
-
-                Log("[INFO] Disconnected.");
+                try { videoTask.Wait(1000); } catch { }
             }
-            catch (Exception ex)
+            
+            if (chatTask != null)
             {
-                Log("[ERROR] Disconnect: " + ex.Message);
+                try { chatTask.Wait(1000); } catch { }
             }
-        }
-
-        private void StartVideoReceiver()
-        {
-            try
+            
+            if (audioTask != null)
             {
-                videoReceiver = new UdpClient();
-                videoReceiver.ExclusiveAddressUse = false;
-                videoReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                videoReceiver.Client.Bind(new IPEndPoint(IPAddress.Any, VIDEO_PORT));
-                videoReceiver.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-
-                videoTask = Task.Run(() => ReceiveVideoLoop());
-                Log("[INFO] Video receiver started on port " + VIDEO_PORT);
+                try { audioTask.Wait(1000); } catch { }
             }
-            catch (Exception ex)
-            {
-                Log("[ERROR] Video receiver: " + ex.Message);
-            }
-        }
-
-        // Estado de reensamblado de video
-        private int currentImageNumber = -1;
-        private byte[] imageBuffer = null;
-        private int receivedPackets = 0;
-        private int expectedPackets = 0;
-
-        private void ReceiveVideoLoop()
-        {
-            IPEndPoint remoteEp = new IPEndPoint(IPAddress.Any, VIDEO_PORT);
-
-            while (isConnected)
-            {
-                try
-                {
-                    byte[] packet = videoReceiver.Receive(ref remoteEp);
-                    if (packet.Length < 28) continue;
-
-                    var receivedAt = DateTime.UtcNow;
-
-                    // Cabecera: timestamp(8) + imageNum(4) + seqNum(4) + totalPackets(4) + totalSize(4) + chunkSize(4) = 28 bytes
-                    long timestampBinary = BitConverter.ToInt64(packet, 0);
-                    int imageNum = BitConverter.ToInt32(packet, 8);
-                    int seqNum = BitConverter.ToInt32(packet, 12);
-                    int totalPackets = BitConverter.ToInt32(packet, 16);
-                    int totalSize = BitConverter.ToInt32(packet, 20);
-                    int chunkSize = BitConverter.ToInt32(packet, 24);
-
-                    // Calcular latencia
-                    var sentAt = DateTime.FromBinary(timestampBinary);
-                    var latencyMs = Math.Max(0, (receivedAt - sentAt).TotalMilliseconds);
-
-                    // Detectar pérdidas de paquetes
-                    if (imageNum == lastReceivedFrameNum && lastReceivedSeqNum >= 0)
-                    {
-                        int expectedSeq = lastReceivedSeqNum + 1;
-                        if (seqNum > expectedSeq)
-                        {
-                            int lostPackets = seqNum - expectedSeq;
-                            performanceTracker.RegisterLoss(lostPackets);
-                        }
-                    }
-
-                    lastReceivedSeqNum = seqNum;
-                    lastReceivedFrameNum = imageNum;
-
-                    // Payload
-                    byte[] chunk = new byte[packet.Length - 28];
-                    Array.Copy(packet, 28, chunk, 0, chunk.Length);
-
-                    // Primer chunk de nueva imagen
-                    if (seqNum == 0)
-                    {
-                        imageBuffer = new byte[totalSize];
-                        currentImageNumber = imageNum;
-                        receivedPackets = 1;
-                        expectedPackets = totalPackets;
-                        Array.Copy(chunk, 0, imageBuffer, 0, chunk.Length);
-                        lastReceivedSeqNum = 0;
-                    }
-                    else if (imageNum == currentImageNumber && receivedPackets < expectedPackets)
-                    {
-                        // Chunk intermedio o final de la misma imagen
-                        int bufferOffset = seqNum * chunkSize;
-                        if (bufferOffset + chunk.Length <= imageBuffer.Length)
-                        {
-                            Array.Copy(chunk, 0, imageBuffer, bufferOffset, chunk.Length);
-                            receivedPackets++;
-
-                            // Si es el último chunk, mostrar imagen
-                            if (receivedPackets == expectedPackets)
-                            {
-                                try
-                                {
-                                    using (MemoryStream ms = new MemoryStream(imageBuffer))
-                                    {
-                                        Bitmap bitmap = new Bitmap(ms);
-                                        ShowFrame(bitmap);
-                                        
-                                        // Registrar frame completo con latencia
-                                        performanceTracker.RegisterFrame(receivedAt, latencyMs);
-                                    }
-                                }
-                                catch { }
-                                
-                                // Reset para siguiente imagen
-                                currentImageNumber = -1;
-                                imageBuffer = null;
-                                receivedPackets = 0;
-                                lastReceivedSeqNum = -1;
-                            }
-                        }
-                    }
-                    else if (imageNum != currentImageNumber && seqNum == 0)
-                    {
-                        // Nueva imagen comenzó pero no completamos la anterior (pérdida)
-                        if (currentImageNumber >= 0 && receivedPackets < expectedPackets)
-                        {
-                            int lostPackets = expectedPackets - receivedPackets;
-                            performanceTracker.RegisterLoss(lostPackets);
-                        }
-                        
-                        // Iniciar nueva imagen
-                        imageBuffer = new byte[totalSize];
-                        currentImageNumber = imageNum;
-                        receivedPackets = 1;
-                        expectedPackets = totalPackets;
-                        Array.Copy(chunk, 0, imageBuffer, 0, chunk.Length);
-                        lastReceivedSeqNum = 0;
-                    }
-                }
-                catch (ObjectDisposedException) { break; }
-                catch (SocketException) { break; }
-                catch (Exception ex)
-                {
-                    if (isConnected)
-                        Log("[ERROR] Video: " + ex.Message);
-                }
-            }
-        }
-
-        private void ShowFrame(Bitmap bitmap)
-        {
-            try
-            {
-                if (InvokeRequired)
-                {
-                    BeginInvoke(new Action(() =>
-                    {
-                        var old = pictureBoxVideo?.Image;
-                        if (pictureBoxVideo != null)
-                        {
-                            pictureBoxVideo.Image = bitmap;
-                        }
-                        old?.Dispose();
-                    }));
-                }
-                else
-                {
-                    var old = pictureBoxVideo?.Image;
-                    if (pictureBoxVideo != null)
-                    {
-                        pictureBoxVideo.Image = bitmap;
-                    }
-                    old?.Dispose();
-                }
-            }
-            catch 
-            { 
-                bitmap?.Dispose(); 
-            }
-        }
-
-        private void StartAudioReceiver()
-        {
-            try
-            {
-                audioReceiver = new UdpClient();
-                audioReceiver.ExclusiveAddressUse = false;
-                audioReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                audioReceiver.Client.Bind(new IPEndPoint(IPAddress.Any, AUDIO_PORT));
-                audioReceiver.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-
-                audioPlayer = new SimpleAudioPlayer();
-                audioPlayer.Start();
-
-                audioTask = Task.Run(() => ReceiveAudioLoop());
-                Log("[INFO] Audio receiver started on port " + AUDIO_PORT);
-            }
-            catch (Exception ex)
-            {
-                Log("[ERROR] Audio receiver: " + ex.Message);
-            }
-        }
-
-        private void ReceiveAudioLoop()
-        {
-            IPEndPoint audioEp = new IPEndPoint(IPAddress.Any, AUDIO_PORT);
-
-            while (isConnected)
-            {
-                try
-                {
-                    byte[] alaw = audioReceiver.Receive(ref audioEp);
-                    short[] decoded = ALawDecoder.ALawDecode(alaw);
-
-                    byte[] pcm = new byte[decoded.Length * 2];
-                    Buffer.BlockCopy(decoded, 0, pcm, 0, pcm.Length);
-
-                    audioPlayer?.AddSamples(pcm, 0, pcm.Length);
-                }
-                catch (ObjectDisposedException) { break; }
-                catch (SocketException) { break; }
-                catch (Exception ex)
-                {
-                    if (isConnected)
-                        Log("[ERROR] Audio loop: " + ex.Message);
-                }
-            }
-        }
-
-        private void StartChat()
-        {
-            try
-            {
-                // Enviar mensajes a servidor
-                chatSender = new UdpClient();
-                chatSenderEndpoint = new IPEndPoint(IPAddress.Parse(MULTICAST_IP), CHAT_CLIENT_PORT);
-                chatSender.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-
-                // Recibir mensajes del servidor
-                chatReceiver = new UdpClient();
-                chatReceiver.ExclusiveAddressUse = false;
-                chatReceiver.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                chatReceiver.Client.Bind(new IPEndPoint(IPAddress.Any, CHAT_SERVER_PORT));
-                chatReceiver.JoinMulticastGroup(IPAddress.Parse(MULTICAST_IP));
-
-                chatTask = Task.Run(() => ReceiveChatLoop());
-                Log("[INFO] Chat initialized.");
-            }
-            catch (Exception ex)
-            {
-                Log("[ERROR] Chat: " + ex.Message);
-            }
-        }
-
-        private void ReceiveChatLoop()
-        {
-            while (isConnected)
-            {
-                try
-                {
-                    byte[] buffer = chatReceiver.Receive(ref chatReceiverEndpoint);
-                    string message = Encoding.UTF8.GetString(buffer);
-
-                    BeginInvoke(new Action(() =>
-                    {
-                        AppendChatMessage(message);
-                    }));
-                }
-                catch (ObjectDisposedException) { break; }
-                catch (SocketException) { break; }
-                catch (Exception ex)
-                {
-                    if (isConnected)
-                        Log("[ERROR] Chat receive: " + ex.Message);
-                }
-            }
-        }
-
-        private void AppendChatMessage(string message)
-        {
-            try
-            {
-                // Parsear formato: "nombre;mensaje" o ";mensaje_sistema"
-                string[] parts = message.Split(';');
-                
-                if (parts.Length >= 2)
-                {
-                    string sender = parts[0];
-                    string text = parts[1];
-
-                    if (string.IsNullOrEmpty(sender))
-                    {
-                        // Mensaje del sistema
-                        listChat?.Items.Add($"[SYSTEM] {text}");
-                    }
-                    else
-                    {
-                        // Mensaje de usuario
-                        listChat?.Items.Add($"[{DateTime.Now:HH:mm}] {sender}: {text}");
-                    }
-
-                    if (listChat != null && listChat.Items.Count > 200)
-                        listChat.Items.RemoveAt(0);
-
-                    if (listChat != null && listChat.Items.Count > 0)
-                        listChat.TopIndex = listChat.Items.Count - 1;
-                }
-            }
-            catch { }
-        }
-
-        private void OnSendMessage(object sender, EventArgs e)
-        {
-            SendChat();
-        }
-
-        private void OnMessageKeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter && !e.Shift)
-            {
-                e.Handled = true;
-                e.SuppressKeyPress = true;
-                SendChat();
-            }
-        }
-
-        private void SendChat()
-        {
-            if (!isConnected || chatSender == null) return;
-
-            string text = txtMessage?.Text.Trim();
-            if (string.IsNullOrEmpty(text)) return;
-
-            try
-            {
-                byte[] msg = Encoding.UTF8.GetBytes($"{userName};{text}");
-                chatSender.Send(msg, msg.Length, chatSenderEndpoint);
-
-                // Mostrar en cliente local
-                BeginInvoke(new Action(() =>
-                {
-                    listChat?.Items.Add($"[{DateTime.Now:HH:mm}] You: {text}");
-                    if (listChat != null && listChat.Items.Count > 200)
-                        listChat.Items.RemoveAt(0);
-                    if (listChat != null && listChat.Items.Count > 0)
-                        listChat.TopIndex = listChat.Items.Count - 1;
-                    txtMessage?.Clear();
-                }));
-            }
-            catch (Exception ex)
-            {
-                Log("[ERROR] Send chat: " + ex.Message);
-            }
-        }
-
-        private void OnSettings(object sender, EventArgs e)
-        {
-            string newName = Microsoft.VisualBasic.Interaction.InputBox("Enter your name:", "Settings", userName);
-            if (!string.IsNullOrWhiteSpace(newName))
-            {
-                userName = newName;
-                lblProfileName.Text = $"Signed in as {userName}";
-            }
+            
+            Log("Desconectado");
+            Application.Exit();
         }
 
         private void OnOpenSettings(object sender, EventArgs e)
         {
-            OnSettings(sender, e);
+            
+        }
+
+        private void OnSendMessage(object sender, EventArgs e)
+        {
+            try
+            {
+                string texto = txtMessage.Text.Trim();
+                if (string.IsNullOrEmpty(texto)) return;
+
+                // Enviar al grupo multicast
+                byte[] datos = System.Text.Encoding.Unicode.GetBytes($"[Usuario] {texto}");
+                chatSender = new UdpClient();
+                
+                // Configurar TTL por si hiciera falta
+                chatSender.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 32);
+                
+                chatSender.Send(datos, datos.Length, new IPEndPoint(IPAddress.Parse(CHAT_IP), CHAT_PORT));
+                chatSender.Close();
+
+                txtMessage.Clear();
+            }
+            catch (Exception ex)
+            {
+                Log($"Error al enviar mensaje: {ex.Message}");
+            }
+        }
+
+        private void OnMessageKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                OnSendMessage(sender, EventArgs.Empty);
+            }
         }
 
         private void OnUiTimerTick(object sender, EventArgs e)
         {
-            if (!isConnected)
-            {
-                lblFps.Text = "FPS: --";
-                lblLatency.Text = "Latency: --";
-                lblJitter.Text = "Jitter: --";
-                lblLoss.Text = "Loss: --";
-                return;
-            }
-
-            try
-            {
-                var snapshot = performanceTracker.BuildSnapshot();
-                
-                if (snapshot.HasSamples)
-                {
-                    lblFps.Text = string.Format("FPS: {0:F1}", snapshot.FramesPerSecond);
-                    lblLatency.Text = string.Format("Latency: {0:F1} ms", snapshot.AverageLatencyMs);
-                    lblJitter.Text = string.Format("Jitter: {0:F1} ms", snapshot.JitterMs);
-                    lblLoss.Text = string.Format("Loss: {0} pkts", snapshot.LostPackets);
-                }
-                else
-                {
-                    lblFps.Text = "FPS: 0.0";
-                    lblLatency.Text = "Latency: 0.0 ms";
-                    lblJitter.Text = "Jitter: 0.0 ms";
-                    lblLoss.Text = "Loss: 0 pkts";
-                }
-            }
-            catch (Exception ex)
-            {
-                Log("[ERROR] Update metrics: " + ex.Message);
-            }
+            
         }
 
-        private void Log(string message)
+        protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            try
+            receivingVideo = false;
+            receivingChat = false;
+            receivingAudio = false;
+            
+            if (videoTask != null)
             {
-                BeginInvoke(new Action(() =>
-                {
-                    listDiagnostics?.Items.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
-                    if (listDiagnostics != null && listDiagnostics.Items.Count > 100)
-                        listDiagnostics.Items.RemoveAt(0);
-                    if (listDiagnostics != null && listDiagnostics.Items.Count > 0)
-                        listDiagnostics.TopIndex = listDiagnostics.Items.Count - 1;
-                }));
+                try { videoTask.Wait(1000); } catch { }
             }
-            catch { }
-        }
-
-        private void OnClientClosing(object sender, FormClosingEventArgs e)
-        {
-            OnDisconnect(null, null);
+            
+            if (chatTask != null)
+            {
+                try { chatTask.Wait(1000); } catch { }
+            }
+            
+            if (audioTask != null)
+            {
+                try { audioTask.Wait(1000); } catch { }
+            }
+            
+            chatReceiver?.Close();
+            waveOut?.Dispose();
+            audioReceiver?.Close();
+            
+            base.OnFormClosing(e);
         }
     }
 }

@@ -15,7 +15,7 @@ namespace MultiCom.Shared.Chat
         {
             if (string.IsNullOrWhiteSpace(message))
             {
-                throw new ArgumentException("[AGENT] Message cannot be empty.", nameof(message));
+                throw new ArgumentException("[ERROR] Message cannot be empty.", nameof(message));
             }
 
             this.senderId = senderId;

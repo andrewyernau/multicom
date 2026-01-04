@@ -34,22 +34,23 @@ namespace MultiCom.Server
             this.btnRefreshCamera = new System.Windows.Forms.Button();
             this.btnStop = new System.Windows.Forms.Button();
             this.btnStart = new System.Windows.Forms.Button();
-            this.panelMetrics = new System.Windows.Forms.Panel();
-            this.lblErrors = new System.Windows.Forms.Label();
-            this.lblBitrate = new System.Windows.Forms.Label();
-            this.lblFrames = new System.Windows.Forms.Label();
+            // this.panelMetrics = new System.Windows.Forms.Panel();
+            // this.lblErrors = new System.Windows.Forms.Label();
+            // this.lblBitrate = new System.Windows.Forms.Label();
+            // this.lblFrames = new System.Windows.Forms.Label();
             this.listClients = new System.Windows.Forms.ListBox();
             this.listEvents = new System.Windows.Forms.ListBox();
             this.labelTitle = new System.Windows.Forms.Label();
+            this.pictureBox = new System.Windows.Forms.PictureBox();
             this.streamingTimer = new System.Windows.Forms.Timer(this.components);
             this.panelSidebar.SuspendLayout();
-            this.panelMetrics.SuspendLayout();
+            // this.panelMetrics.SuspendLayout();
             this.SuspendLayout();
             // 
             // panelSidebar
             // 
             this.panelSidebar.BackColor = Color.FromArgb(32, 34, 37);
-            this.panelSidebar.Controls.Add(this.panelMetrics);
+            // this.panelSidebar.Controls.Add(this.panelMetrics);
             this.panelSidebar.Controls.Add(this.btnRefreshCamera);
             this.panelSidebar.Controls.Add(this.btnStop);
             this.panelSidebar.Controls.Add(this.btnStart);
@@ -135,6 +136,7 @@ namespace MultiCom.Server
             // 
             // panelMetrics
             // 
+            /*
             this.panelMetrics.BackColor = Color.FromArgb(47, 49, 54);
             this.panelMetrics.Controls.Add(this.lblErrors);
             this.panelMetrics.Controls.Add(this.lblBitrate);
@@ -145,9 +147,9 @@ namespace MultiCom.Server
             this.panelMetrics.Padding = new System.Windows.Forms.Padding(16);
             this.panelMetrics.Size = new System.Drawing.Size(248, 160);
             this.panelMetrics.TabIndex = 4;
-            // 
-            // lblErrors
-            // 
+            */
+            /*
+            // lblErrors - COMENTADO
             this.lblErrors.AutoSize = true;
             this.lblErrors.ForeColor = Color.LightGray;
             this.lblErrors.Location = new System.Drawing.Point(16, 96);
@@ -156,8 +158,7 @@ namespace MultiCom.Server
             this.lblErrors.TabIndex = 2;
             this.lblErrors.Text = "Last push: -";
             // 
-            // lblBitrate
-            // 
+            // lblBitrate - COMENTADO
             this.lblBitrate.AutoSize = true;
             this.lblBitrate.ForeColor = Color.LightGray;
             this.lblBitrate.Location = new System.Drawing.Point(16, 64);
@@ -166,8 +167,7 @@ namespace MultiCom.Server
             this.lblBitrate.TabIndex = 1;
             this.lblBitrate.Text = "Snapshots: 0";
             // 
-            // lblFrames
-            // 
+            // lblFrames - COMENTADO
             this.lblFrames.AutoSize = true;
             this.lblFrames.ForeColor = Color.LightGray;
             this.lblFrames.Location = new System.Drawing.Point(16, 32);
@@ -175,6 +175,7 @@ namespace MultiCom.Server
             this.lblFrames.Size = new System.Drawing.Size(95, 20);
             this.lblFrames.TabIndex = 0;
             this.lblFrames.Text = "Online: 0";
+            */
             // 
             // listClients
             // 
@@ -216,6 +217,15 @@ namespace MultiCom.Server
             this.labelTitle.TabIndex = 3;
             this.labelTitle.Text = "MultiCom Presence Hub";
             // 
+            // pictureBox
+            // 
+            this.pictureBox.BackColor = Color.FromArgb(47, 49, 54);
+            this.pictureBox.Location = new System.Drawing.Point(304, 80);
+            this.pictureBox.Name = "pictureBox";
+            this.pictureBox.Size = new System.Drawing.Size(640, 480);
+            this.pictureBox.TabIndex = 4;
+            this.pictureBox.TabStop = false;
+            // 
             // streamingTimer
             // 
             this.streamingTimer.Interval = 1000;
@@ -227,6 +237,7 @@ namespace MultiCom.Server
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.BackColor = Color.FromArgb(54, 57, 63);
             this.ClientSize = new System.Drawing.Size(1000, 640);
+            this.Controls.Add(this.pictureBox);
             this.Controls.Add(this.labelTitle);
             this.Controls.Add(this.listEvents);
             this.Controls.Add(this.listClients);
@@ -238,8 +249,10 @@ namespace MultiCom.Server
             this.Load += new System.EventHandler(this.OnFormLoaded);
             this.panelSidebar.ResumeLayout(false);
             this.panelSidebar.PerformLayout();
+            /*
             this.panelMetrics.ResumeLayout(false);
             this.panelMetrics.PerformLayout();
+            */
             this.ResumeLayout(false);
             this.PerformLayout();
 
@@ -252,13 +265,15 @@ namespace MultiCom.Server
         private System.Windows.Forms.Button btnRefreshCamera;
         private System.Windows.Forms.Button btnStop;
         private System.Windows.Forms.Button btnStart;
-        private System.Windows.Forms.Panel panelMetrics;
-        private System.Windows.Forms.Label lblErrors;
-        private System.Windows.Forms.Label lblBitrate;
-        private System.Windows.Forms.Label lblFrames;
+        
+        // private System.Windows.Forms.Panel panelMetrics;
+        // private System.Windows.Forms.Label lblErrors;
+        // private System.Windows.Forms.Label lblBitrate;
+        // private System.Windows.Forms.Label lblFrames;
         private System.Windows.Forms.ListBox listClients;
         private System.Windows.Forms.ListBox listEvents;
         private System.Windows.Forms.Label labelTitle;
+        private System.Windows.Forms.PictureBox pictureBox;
         private System.Windows.Forms.Timer streamingTimer;
     }
 }
