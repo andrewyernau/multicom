@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using NAudio.Wave;
 using MultiCom.Shared.Audio;
+using MultiCom.Shared.Networking;
 
 namespace MultiCom.Client
 {
@@ -16,6 +17,9 @@ namespace MultiCom.Client
         private bool receivingVideo = false;
         private Task videoTask;
         
+        // Estadísticas de video
+        private VideoStatistics videoStats = new VideoStatistics();
+        
         // Chat multicast
         private UdpClient chatSender;
         private UdpClient chatReceiver;
@@ -23,6 +27,9 @@ namespace MultiCom.Client
         private bool receivingChat = false;
         private const int CHAT_PORT = 8082;
         private const string CHAT_IP = "224.0.0.1";
+        
+        // User settings
+        private string userName = "Usuario";
         
         // Audio multicast
         private UdpClient audioReceiver;
@@ -144,23 +151,29 @@ namespace MultiCom.Client
                 {
                     try
                     {
-                        byte[] buffer = chatReceiver.Receive(ref chatEP);
-                        string mensaje = System.Text.Encoding.Unicode.GetString(buffer);
-
-                        // Mostrar en el cjat los mensajes
-                        if (listChat.InvokeRequired)
-                        {
-                            listChat.BeginInvoke(new Action(() =>
-                            {
-                                listChat.Items.Add(mensaje);
-                                listChat.TopIndex = listChat.Items.Count - 1;
-                            }));
-                        }
-                        else
-                        {
-                            listChat.Items.Add(mensaje);
-                            listChat.TopIndex = listChat.Items.Count - 1;
-                        }
+                         byte[] buffer = chatReceiver.Receive(ref chatEP);
+                         
+                         // Parsear mensaje con ChatEnvelope
+                         MultiCom.Shared.Chat.ChatEnvelope envelope;
+                         if (MultiCom.Shared.Chat.ChatEnvelope.TryParse(buffer, out envelope))
+                         {
+                             string mensaje = $"[{envelope.TimestampUtc.ToLocalTime():HH:mm:ss}] {envelope.Sender}: {envelope.Message}";
+                             
+                             // Mostrar en el chat los mensajes
+                             if (listChat.InvokeRequired)
+                             {
+                                 listChat.BeginInvoke(new Action(() =>
+                                 {
+                                     listChat.Items.Add(mensaje);
+                                     listChat.TopIndex = listChat.Items.Count - 1;
+                                 }));
+                             }
+                             else
+                             {
+                                 listChat.Items.Add(mensaje);
+                                 listChat.TopIndex = listChat.Items.Count - 1;
+                             }
+                         }
                     }
                     catch (SocketException)
                     {
@@ -206,29 +219,43 @@ namespace MultiCom.Client
                 try
                 {
                     byte[] paquete = udpClient.Receive(ref remoteep);
-                    if (paquete.Length <= 12) continue;
 
-                    // Leer cabecera
-                    uint imageNumber = BitConverter.ToUInt32(paquete, 0);
-                    long timestampEmisor = BitConverter.ToInt64(paquete, 4);
-                    long ahora = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    long latencia = ahora - timestampEmisor;
+                    // Parsear con cabecera mejorada
+                    VideoHeader header;
+                    byte[] payload;
+                    
+                    if (!VideoHeader.TryParsePacket(paquete, out header, out payload))
+                    {
+                        videoStats.RegisterCorrupted();
+                        continue;
+                    }
+
+                    // Verificar checksum
+                    if (!header.VerifyChecksum(payload))
+                    {
+                        videoStats.RegisterCorrupted();
+                        continue;
+                    }
+
+                    // Registrar recepción y detectar pérdidas
+                    int lostPackets = videoStats.RegisterPacket(header.ImageNumber);
+
+                    // Calcular latencia usando Ticks
+                    long ahoraTicks = DateTime.UtcNow.Ticks;
+                    long latenciaTicks = ahoraTicks - header.TimestampUtc;
+                    long latenciaMs = latenciaTicks / TimeSpan.TicksPerMillisecond;
 
                     // Calcular jitter
                     if (ultimaLatencia.HasValue)
                     {
-                        long variacion = Math.Abs(latencia - ultimaLatencia.Value);
+                        long variacion = Math.Abs(latenciaMs - ultimaLatencia.Value);
                         jitterAcumulado += variacion;
                         muestras++;
                     }
-                    ultimaLatencia = latencia;
-
-                    // Extraer JPEG
-                    byte[] jpeg = new byte[paquete.Length - 12];
-                    Array.Copy(paquete, 12, jpeg, 0, jpeg.Length);
+                    ultimaLatencia = latenciaMs;
 
                     // Convertir a imagen
-                    _latestFrame = (Bitmap)ByteArrayToImage(jpeg);
+                    _latestFrame = (Bitmap)ByteArrayToImage(payload);
                     if (_latestFrame != null)
                     {
                         Bitmap resizedImage = new Bitmap(_latestFrame, new Size(640, 480));
@@ -244,9 +271,9 @@ namespace MultiCom.Client
                         // Actualizar métricas
                         this.Invoke((MethodInvoker)(() =>
                         {
-                            lblLatency.Text = $"Latencia: {latencia} ms";
+                            lblLatency.Text = $"Latencia: {latenciaMs} ms";
                             lblJitter.Text = $"Jitter: {(muestras > 0 ? (jitterAcumulado / muestras).ToString("F2") : "0")} ms";
-                            lblFps.Text = $"Frames: {frameCount}";
+                            lblFps.Text = $"Frames: {frameCount} | Perdidos: {videoStats.TotalLost} | Tasa: {videoStats.LossRate:F2}%";
                         }));
                     }
                 }
@@ -311,7 +338,79 @@ namespace MultiCom.Client
 
         private void OnOpenSettings(object sender, EventArgs e)
         {
-            
+            try
+            {
+                using (var dialog = new Form())
+                {
+                    dialog.Text = "Configuración de Usuario";
+                    dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    dialog.StartPosition = FormStartPosition.CenterParent;
+                    dialog.MaximizeBox = false;
+                    dialog.MinimizeBox = false;
+                    dialog.BackColor = Color.FromArgb(54, 57, 63);
+                    dialog.ForeColor = Color.White;
+                    dialog.ClientSize = new Size(350, 120);
+
+                    var lblName = new Label
+                    {
+                        Text = "Nombre de usuario:",
+                        Location = new Point(20, 20),
+                        AutoSize = true,
+                        ForeColor = Color.White
+                    };
+
+                    var txtName = new TextBox
+                    {
+                        Text = userName,
+                        Location = new Point(20, 45),
+                        Size = new Size(310, 25),
+                        BackColor = Color.FromArgb(32, 34, 37),
+                        ForeColor = Color.White
+                    };
+
+                    var btnOk = new Button
+                    {
+                        Text = "Guardar",
+                        Location = new Point(160, 80),
+                        Size = new Size(80, 30),
+                        BackColor = Color.FromArgb(67, 181, 129),
+                        ForeColor = Color.White,
+                        FlatStyle = FlatStyle.Flat,
+                        DialogResult = DialogResult.OK
+                    };
+
+                    var btnCancel = new Button
+                    {
+                        Text = "Cancelar",
+                        Location = new Point(250, 80),
+                        Size = new Size(80, 30),
+                        BackColor = Color.FromArgb(114, 118, 125),
+                        ForeColor = Color.White,
+                        FlatStyle = FlatStyle.Flat,
+                        DialogResult = DialogResult.Cancel
+                    };
+
+                    dialog.Controls.Add(lblName);
+                    dialog.Controls.Add(txtName);
+                    dialog.Controls.Add(btnOk);
+                    dialog.Controls.Add(btnCancel);
+                    dialog.AcceptButton = btnOk;
+
+                    if (dialog.ShowDialog() == DialogResult.OK)
+                    {
+                        string newName = txtName.Text.Trim();
+                        if (!string.IsNullOrEmpty(newName))
+                        {
+                            userName = newName;
+                            Log($"Nombre de usuario cambiado a: {userName}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error al abrir configuración: {ex.Message}");
+            }
         }
 
         private void OnSendMessage(object sender, EventArgs e)
@@ -321,8 +420,15 @@ namespace MultiCom.Client
                 string texto = txtMessage.Text.Trim();
                 if (string.IsNullOrEmpty(texto)) return;
 
-                // Enviar al grupo multicast
-                byte[] datos = System.Text.Encoding.Unicode.GetBytes($"[Usuario] {texto}");
+                // Crear envelope con información del usuario
+                var envelope = new MultiCom.Shared.Chat.ChatEnvelope(
+                    Guid.NewGuid(),
+                    userName,
+                    texto,
+                    DateTime.UtcNow
+                );
+                
+                byte[] datos = envelope.ToPacket();
                 chatSender = new UdpClient();
                 
                 // Configurar TTL por si hiciera falta

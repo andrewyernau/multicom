@@ -43,6 +43,8 @@
     <Compile Include="Networking\VideoPacket.cs" />
     <Compile Include="Networking\VideoFrameAssembler.cs" />
     <Compile Include="Networking\PerformanceTracker.cs" />
+    <Compile Include="Networking\VideoHeader.cs" />
+    <Compile Include="Networking\VideoStatistics.cs" />
     <Compile Include="Chat\ChatEnvelope.cs" />
     <Compile Include="Audio\AudioFrame.cs" />
     <Compile Include="Audio\AudioFormat.cs" />

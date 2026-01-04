@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using Touchless.Vision.Camera;
 using NAudio.Wave;
 using MultiCom.Shared.Audio;
+using MultiCom.Shared.Networking;
 
 namespace MultiCom.Server
 {
@@ -15,6 +16,9 @@ namespace MultiCom.Server
     {
         private CameraFrameSource _frameSource;
         private static Bitmap _latestFrame;
+        
+        // Contador de imágenes
+        private uint imageCounter = 0;
         
         // Audio
         private WaveInEvent waveIn;
@@ -92,19 +96,27 @@ namespace MultiCom.Server
                     udpServer.JoinMulticastGroup(multicastaddress);
                     IPEndPoint remote = new IPEndPoint(multicastaddress, 8080);
 
-                    uint imageNumber = (uint)Environment.TickCount;
-                    long timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    // Incrementar contador de imagen
+                    imageCounter++;
 
+                    // Convertir a JPEG
                     byte[] jpegData = ImageToByteArray(resized);
-                    using (MemoryStream ms = new MemoryStream())
-                    {
-                        ms.Write(BitConverter.GetBytes(imageNumber), 0, 4);
-                        ms.Write(BitConverter.GetBytes(timestamp), 0, 8);
-                        ms.Write(jpegData, 0, jpegData.Length);
 
-                        byte[] paquete = ms.ToArray();
-                        udpServer.Send(paquete, paquete.Length, remote);
-                    }
+                    // Crear cabecera
+                    var header = new VideoHeader
+                    {
+                        ImageNumber = imageCounter,
+                        TimestampUtc = DateTime.UtcNow.Ticks,
+                        PayloadSize = jpegData.Length,
+                        Width = (ushort)resized.Width,
+                        Height = (ushort)resized.Height,
+                        Quality = 85,
+                        Checksum = VideoHeader.CalculateChecksum(jpegData)
+                    };
+
+                    // Crear paquete completo
+                    byte[] packet = VideoHeader.CreatePacket(header, jpegData);
+                    udpServer.Send(packet, packet.Length, remote);
 
                     udpServer.Close();
                 }
@@ -270,10 +282,14 @@ namespace MultiCom.Server
                     try
                     {
                         byte[] buffer = chatReceiver.Receive(ref chatEP);
-                        string mensaje = System.Text.Encoding.Unicode.GetString(buffer);
-
-                        // Mostrar en el log
-                        Log($"Chat: {mensaje}");
+                        
+                        // Parsear mensaje con ChatEnvelope
+                        MultiCom.Shared.Chat.ChatEnvelope envelope;
+                        if (MultiCom.Shared.Chat.ChatEnvelope.TryParse(buffer, out envelope))
+                        {
+                            string mensaje = $"[{envelope.TimestampUtc.ToLocalTime():HH:mm:ss}] {envelope.Sender}: {envelope.Message}";
+                            Log(mensaje);
+                        }
                     }
                     catch (SocketException)
                     {
